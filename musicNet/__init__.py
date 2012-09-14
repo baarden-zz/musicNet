@@ -10,14 +10,13 @@
 # License:      MPL 2.0
 #-------------------------------------------------------------------------------
 
-#
-# BEFORE RUNNING DOCTESTS:
-# Do this first:
-# >>> import music21.musicNet
-# >>> music21.musicNet._prepDoctests()
-#
 
 '''
+.. testsetup:: *
+
+    import music21.musicNet
+    music21.musicNet._prepDoctests()
+
 The musicNet module provides objects for searching music data in a network database
 (specifically the Neo4j database), and for adding music21 data to the database. 
 Queries are constructed by creating relationships between objects (notes, measures, parts, etc.).
@@ -87,6 +86,18 @@ import py2neo.neo4j
 import music21
 from music21 import *
 
+
+def _prepDoctests():
+    '''Execute this function before running doctests. 
+    Results from the tests depend on the state of the database, and there is
+    no way (!?!) to control the order of block testing. This function will
+    purge the database and import a sample file.
+    '''
+    db = Database()
+    db.wipeDatabase()
+    bwv84_5 = corpus.parse('bach/bwv84.5.mxl')
+    addMomentsToScore(bwv84_5)
+    db.addScore(bwv84_5, index='bach/bwv84.5.mxl')
 
 def addMomentsToScore(score):
     '''Adds :class:`Moment` objects to a :class:`~music21.stream.Score`.
