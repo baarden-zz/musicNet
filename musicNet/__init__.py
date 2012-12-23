@@ -1,7 +1,7 @@
 #!/usr/bin/python
 #-------------------------------------------------------------------------------
 # Name:         musicNet.py
-# Purpose:      classes for connecting music21 to, and searching, Neo4j
+# Purpose:      classes for connecting music21 to and searching Neo4j
 #
 # Authors:      Bret Aarden
 # Version:      0.1
@@ -9,7 +9,6 @@
 #
 # License:      MPL 2.0
 #-------------------------------------------------------------------------------
-
 
 '''
 .. testsetup:: *
@@ -43,7 +42,7 @@ Configuration
 -------------
 
 This module requires that the `py2neo <http://py2neo.org/>`_ Python module be installed,
-and that you have access to a `Neo4j <http://neo4j.org/>`_ database (version 1.4 or newer).
+and that you have access to a `Neo4j <http://neo4j.org/>`_ database (version 1.8 or newer).
 
 The database must be configured to use automatic indexing. (Well, technically it doesn't, 
 but it will make open-ended searches a lot faster.) This involves editing the
@@ -71,6 +70,7 @@ just move to the database directory and enter::
 
 #Suggestions for music21:
 #Change Measure.keySignature, .timeSignature, and .clef from None to weakRefs.
+#Add direct means of manipulating Lilypond headers (removing tagline, etc.)
 
 #Suggestions for py2neo
 #Authorization on databases doesn't appear to work with .create().
@@ -99,7 +99,7 @@ def _prepDoctests():
     addMomentsToScore(bwv84_5)
     db.addScore(bwv84_5, index='bach/bwv84.5.mxl')
 
-def addMomentsToScore(score):
+def addMomentsToScore(score, forceAdd=False):
     '''Adds :class:`Moment` objects to a :class:`~music21.stream.Score`.
     Without them, the :meth:`Database.addScore` method will not 
     be able to add vertical note relationships to the database, such as
@@ -113,15 +113,63 @@ def addMomentsToScore(score):
     >>> print len(bwv84_5)
     73
     '''
-    flatscore = score.flat
-    alloffsets = list(set([x.offset for x in flatscore.notesAndRests]))
-    alloffsets.sort()
-    for offset in alloffsets:
-        notes = flatscore.getElementsByOffset(offset, mustBeginInSpan=False,
-                                              classList=[note.Note])
-        notes = [x for x in notes]
-        moment = Moment(notes)
+    for el in score:
+        if el.__class__.__name__ == 'Moment':
+            if forceAdd:
+                break
+            sys.stderr.write('This score already has Moments. ',
+                             'Use the forceAdd=True argument to override.\n')
+            return
+
+    attackLookup = {}
+    addNotesFromStream(attackLookup, score, 0)    
+    attackOffsets = attackLookup.keys()
+    attackOffsets.sort()
+    
+    import heapq
+    releaseOffsets = []
+    releaseLookup = {}
+    for offset in attackOffsets:
+        moment = Moment()
+        # drop any sustained notes that have passed
+        while (releaseOffsets and releaseOffsets[0] <= offset):
+            del releaseLookup[releaseOffsets[0]]
+            heapq.heappop(releaseOffsets) # always returns the lowest element
+        # add any current sustained notes to the moment
+        for r in releaseOffsets:
+            for n in releaseLookup[r]:
+                moment.addComponents(n, sameOffset=False)
+        # add any new onsets to the moment
+        # add a release reference for every note
+        notes = attackLookup[offset]
+        for note in notes:
+            moment.addComponents(note, sameOffset=True)
+            noteReleaseOffset = offset + note.quarterLength
+            if (noteReleaseOffset not in releaseOffsets):
+                heapq.heappush(releaseOffsets, noteReleaseOffset)
+                releaseLookup[noteReleaseOffset] = weakref.WeakSet()
+            releaseLookup[noteReleaseOffset].add(note)
         score.insert(offset, moment)
+
+def addNotesFromStream(attackLookup, obj, offset):
+    try:
+        classes = obj._classes
+    except AttributeError:
+        return
+    if classes == None:
+        return
+    offset += obj.offset
+    if 'Stream' in classes:
+        for el in obj:
+            addNotesFromStream(attackLookup, el, offset)
+        return
+    if 'Note' not in classes:
+        return
+    # Add a reference to the Note indexed by offset
+    try:
+        attackLookup[offset].add(obj)
+    except KeyError:
+        attackLookup[offset] = weakref.WeakSet([obj])
 
 def _signedModulo(val, mod):
     ''' This modulo function will return both negative and positive numbers.
@@ -132,6 +180,12 @@ def _signedModulo(val, mod):
     while abs(val) > mod:
         val -= mod * sign
     return val
+
+def _getPy2neoMetadata(node):
+    ''' Returns the hidden metadata of a py2neo object, 
+    the location of which can change depending on the version of Neo4j.
+    '''
+    return node._Resource__metadata
 
 def _convertFromString(val):
     if not isinstance(val, (str, unicode)):
@@ -184,12 +238,12 @@ class Database(object):
         self._extractState = {}
         self._defaultCallbacks()
         self._m21SuperclassLookup = self._inspectMusic21ExpressionsArticulations()
-        self._skipProperties = ('nodeRef', 'parent', '_activeSite', 'id', '_classes', 'groups',
+        self._skipProperties = ('_activeSite', 'id', '_classes', 'groups', 'sites',
                                '_derivation', '_overriddenLily', '_definedContexts', '_activeSiteId', 
                                '_idLastDeepCopyOf', '_mutable', '_elements', '_cache', 'isFlat', 
                                'autosort', '_components', '_unlinkedDuration', 'isSorted', 
                                'flattenedRepresentationOf', '_reprHead', 'idLocal', 'autoSort',
-                               'inherited') 
+                               'inherited', '_fullyQualifiedClasses') 
 
     def wipeDatabase(self):
         '''Removes all relationships and nodes from the database.
@@ -209,16 +263,14 @@ class Database(object):
         '''
         q = Query(self)
         q.setStartRelationship()
-        q.setLimit(100)
         while (self.graph_db.get_relationship_count()):
-            results, meta = q.execute()
+            results, meta = q.results(limit=100)
             results = [x[0] for x in results]
             self.graph_db.delete(*results)
         q = Query(self)
         q.setStartNode()
-        q.setLimit(100)
         while (self.graph_db.get_node_count() > 1):
-            results, meta = q.execute()
+            results, meta = q.results(limit=100)
             results = [x[0] for x in results]
             self.graph_db.delete(*results)
 
@@ -243,15 +295,15 @@ class Database(object):
         459
         >>> print db.graph_db.get_relationship_count()
         1519
-        '''        
+        '''
         self.nodes = []
         self.edges = []
-        self.nodeLookup = {}
+#        self.nodeLookup = {}
         self._extractState = { 'verbose': verbose,
                               'nodeCnt': 0,
-                              'relationCnt': 0 }
+                              'relationCnt': 0,
+                              'nodeLookup': {} } #vertex, parent, voice
         import copy
-        score = copy.deepcopy(score)
         if index:
             score.index = index
         if verbose:
@@ -261,9 +313,9 @@ class Database(object):
             sys.stderr.write('Extracting music21 objects..........')
         self._extractNodes(score)        
         self._writeNodesToDatabase()        
-        self._writeEdgesToDatabase()
+        self._writeEdgesToDatabase(score)
 
-    def listScores(self):
+    def listScores(self, start=0, limit=100):
         '''Returns a list of dict objects with information about the scores that have been added 
         to the database, with keys for `movementName`, `_names` (a list of 
         contributor/composer names), and `index`.
@@ -280,7 +332,7 @@ class Database(object):
         inMetadata = q.addRelationship(relationType='ContributorInMetaData', end=meta, optional=True)
         contributor = inMetadata.start
         q.addReturns(meta.movementName, contributor._names, score.index)
-        results, meta = q.execute()
+        results, meta = q.results(start, limit)
         columns = [x[x.find('.') + 1:] for x in meta]
         scores = {}
         for row in results:
@@ -330,13 +382,14 @@ class Database(object):
             self.listNodeTypes()
         self.nodeProperties = []
         q = Query(self)
-        q.setLimit(50)
         for nodeType in self.nTypes:
             q.setStartNode(nodeType=nodeType)
-            q.execute()
+            results, meta = q.results(limit=50)
+            results = [x[0] for x in results]
+            nodes = self.graph_db.get_properties(*results)
             properties = set()
-            for node in q.getResults():
-                for prop in node[0].get_properties():
+            for node in nodes:
+                for prop in node:
                     if prop == 'type':
                         continue
                     properties.add(prop)
@@ -369,8 +422,8 @@ class Database(object):
             q = Query(self)
             r = q.setStartRelationship(relationType=relateType)
             q.addReturns(r.start.type, r.end.type)
-            q.execute()
-            for n1, n2 in q.getResults():
+            results, meta = q.results(limit=100)
+            for n1, n2 in results:
                 rTypes.add( (n1, relateType, n2) )
                 self.nTypes.add(n1)
                 self.nTypes.add(n2)
@@ -396,14 +449,15 @@ class Database(object):
         for x in self.listRelationshipTypes():
             rTypes.add(x['type']) 
         self.relateProperties = []
-        q = Query(self)
-        q.setLimit(50)
         for rType in rTypes:
+            q = Query(self)
             q.setStartRelationship(relationType=rType)
-            q.execute()
+            results, meta = q.results(limit=50)
+            results = [x[0] for x in results]
+            nodes = self.graph_db.get_properties(*results)
             properties = set()
-            for relate in q.getResults():
-                for prop in relate[0].get_properties():
+            for relate in results:
+                for prop in relate:
                     if prop == 'type': continue
                     properties.add(prop)
             for p in properties:
@@ -468,11 +522,13 @@ class Database(object):
         
         # Part
         def addPartNumber(db, part):
-            score = part.parent
+            nodeLookup = db._extractState['nodeLookup']
+            score = nodeLookup[part]['parent']
             for i in range(len(score)):
                 if score[i] == part:
                     break
-            part.vertex['number'] = i
+            vertex = nodeLookup[part]['vertex']
+            vertex['number'] = i
             db._extractState['history'] = { 'NoteToNote': {}, 'NoteToNoteByBeat': {} }
             for key in ('clef', 'timeSignature', 'keySignatureSharps', 'keySignatureMode'):
                 db._extractState[key] = None
@@ -482,32 +538,35 @@ class Database(object):
         def addSignaturesAndClefs(db, measure):
             if measure.clef:
                 self._extractState['clef'] = measure.clef.classes[0]
-            measure.vertex['clef'] = self._extractState['clef']
+            vertex = db._extractState['nodeLookup'][measure]['vertex']
+            vertex['clef'] = self._extractState['clef']
             if measure.timeSignature:
-                self._extractState['timeSignature'] = unicode(measure.timeSignature)
-            measure.vertex['timeSignature'] = self._extractState['timeSignature']
+                self._extractState['timeSignature'] = measure.timeSignature.ratioString
+            vertex['timeSignature'] = self._extractState['timeSignature']
             if measure.keySignature:
                 self._extractState['keySignatureSharps'] = measure.keySignature.sharps
                 self._extractState['keySignatureMode'] = measure.keySignature.mode
-            measure.vertex['keySignatureSharps'] = self._extractState['keySignatureSharps']
-            measure.vertex['keySignatureMode'] = self._extractState['keySignatureMode']
+            vertex['keySignatureSharps'] = self._extractState['keySignatureSharps']
+            vertex['keySignatureMode'] = self._extractState['keySignatureMode']
         self.addPropertyCallback('Measure', addSignaturesAndClefs)            
         
         # Chord
         def labelChordNotes(db, chordObj):
+            nodeLookup = db._extractState['nodeLookup']
             chordObj.sortAscending(inPlace=True)
             for i in range(len(chordObj)):
                 noteObj = chordObj[i]
-                noteObj.voice = len(chordObj) - i
-                noteObj.parent = chordObj.parent
+                nodeLookup[nodeObj]['voice'] = len(chordObj) - i
+                nodeLookup[noteObj]['parent'] = nodeLookup[chordObj]['parent']
             return HIDEFROMDATABASE
         self.addPropertyCallback('Chord', labelChordNotes)
         
         # Voice
         def labelVoiceNotes(db, voice):
+            nodeLookup = db._extractState['nodeLookup']
             for noteObj in voice:
-                noteObj.voice = int(voice.id)
-                noteObj.parent = voice.parent
+                nodeLookup[noteObj]['voice'] = int(voice.id)
+                nodeLookup[noteObj]['parent'] = nodeLookup[voice]['parent']
             return HIDEFROMDATABASE
         self.addPropertyCallback('Voice', labelVoiceNotes)
 
@@ -517,20 +576,24 @@ class Database(object):
                 if noteObj.isRest:
                     return
                 history = db._extractState['history']
+                nodeLookup = db._extractState['nodeLookup']
+                voice = nodeLookup[noteObj]['voice']
                 try:
-                    prevNote, prevOffset = history[relationship][noteObj.voice]
+                    prevNote, prevOffset = history[relationship][voice]
                     voiceleadingHistory = True
                 except KeyError:
                     voiceleadingHistory = False
                 # Only calculate voiceleading for notes within the span of a measure.
-                if voiceleadingHistory and offset - prevOffset <= noteObj.parent.barDuration:
+                if (voiceleadingHistory and 
+                        offset - prevOffset <= nodeLookup[noteObj]['parent'].barDuration):
                     mint = noteObj.midi - prevNote.midi
                     db._addEdge(prevNote, relationship, noteObj, { 'interval': mint } )
-                history[relationship][noteObj.voice] = [noteObj, offset]
+                history[relationship][voice] = [noteObj, offset]
             
-            offset = noteObj.parent.offset + noteObj.offset
-            if not hasattr(noteObj, 'voice'):
-                noteObj.voice = 1
+            nodeLookup = db._extractState['nodeLookup']
+            offset = nodeLookup[noteObj]['parent'].offset + noteObj.offset
+            if 'voice' not in nodeLookup[noteObj]:
+                nodeLookup[noteObj]['voice'] = 1
             addVoiceleading(db, 'NoteToNote', noteObj, offset)
             if noteObj.offset % 1 == 0:
                 addVoiceleading(db, 'NoteToNoteByBeat', noteObj, offset)
@@ -538,23 +601,28 @@ class Database(object):
 
         # Pitch
         def addPitchToNote(db, pitchObj):
-            noteObj = pitchObj.parent
-            noteObj.vertex['pitch'] = pitchObj.nameWithOctave
-            noteObj.vertex['midi'] = pitchObj.midi
-            noteObj.vertex['microtone'] = pitchObj.microtone.cents
+            nodeLookup = db._extractState['nodeLookup']
+            noteObj = nodeLookup[pitchObj]['parent']
+            vertex = nodeLookup[noteObj]['vertex']
+            vertex['pitch'] = pitchObj.nameWithOctave
+            vertex['midi'] = pitchObj.midi
+            vertex['microtone'] = pitchObj.microtone.cents
             return HIDEFROMDATABASE
         self.addPropertyCallback('Pitch', addPitchToNote)
 
         # Duration
         def addDurationToParent(db, durationObj):
-            parentType = durationObj.parent.__class__.__name__
+            nodeLookup = db._extractState['nodeLookup']
+            parent = nodeLookup[durationObj]['parent']
+            parentType = parent.__class__.__name__
+            vertex = nodeLookup[parent]['vertex']
             if parentType not in ('StaffGroup', 'Instrument', 'Metadata'):
-                durationObj.parent.vertex['quarterLength'] = durationObj.quarterLength
+                vertex['quarterLength'] = durationObj.quarterLength
             if parentType == 'Note':
-                durationObj.parent.vertex['isGrace'] = durationObj.isGrace
+                vertex['isGrace'] = durationObj.isGrace
                 if hasattr(durationObj, 'stealTimePrevious'):
                     for attr in ('stealTimePrevious', 'stealTimeFollowing', 'slash'):
-                        durationObj.parent.vertex[attr] = getattr(durationObj, attr)
+                        vertex[attr] = getattr(durationObj, attr)
             return HIDEFROMDATABASE
         self.addPropertyCallback('Duration', addDurationToParent)
         
@@ -567,8 +635,9 @@ class Database(object):
         def useAbstractType(db, obj):
             abstractions = ('Expression', 'Articulation')
             superclass = [x for x in obj.classes if x in abstractions][0]
-            obj.vertex['type'] = superclass
-            obj.vertex['name'] = obj.__class__.__name__
+            vertex = db._extractState['nodeLookup'][obj]['vertex']
+            vertex['type'] = superclass
+            vertex['name'] = obj.__class__.__name__
         self.addPropertyCallback('Expression', useAbstractType)
         self.addPropertyCallback('Articulation', useAbstractType)
 
@@ -585,9 +654,10 @@ class Database(object):
 
         # Beams
         def addBeams(db, beams):
-            noteObj = beams.parent
+            nodeLookup = db._extractState['nodeLookup']
+            noteObj = nodeLookup[beams]['parent']
             for beam in beams.beamsList:
-                beam.parent = noteObj
+                nodeLookup[beam] = { 'parent': noteObj }
                 db._addNode(beam)
             return HIDEFROMDATABASE
         self.addPropertyCallback('Beams', addBeams)
@@ -596,16 +666,17 @@ class Database(object):
         def addMidmeasureClefs(db, clefObj):
             if clefObj.offset == 0:
                 return HIDEFROMDATABASE
-            clefObj.vertex['type'] = 'MidmeasureClef'
-            clefObj.vertex['name'] = clefObj.__class__.__name__
+            vertex = db._extractState['nodeLookup'][clefObj]['vertex']
+            vertex['type'] = 'MidmeasureClef'
+            vertex['name'] = clefObj.__class__.__name__
         self.addPropertyCallback('Clef', addMidmeasureClefs)
         
         # Moment
         def addCrossPartRelationships(db, moment):
-            simultaneous = list(moment.__dict__.pop('simultaneous'))
+            simultaneous = list(moment.simultaneous)
             for noteObj in simultaneous:
                 db._addEdge(noteObj, 'NoteSustainedAtMoment', moment)
-            sameOffset = list(moment.__dict__.pop('sameOffset'))
+            sameOffset = list(moment.sameOffset)
             for noteObj in sameOffset:
                 db._addEdge(noteObj, 'NoteStartsAtMoment', moment)
             notes = sameOffset + simultaneous
@@ -620,6 +691,7 @@ class Database(object):
                         simuls[note1] = {}
                     if note2 in simuls and note1 in simuls[note2]:
                         continue
+                    simuls[note1][note2] = True
                     cInt = note1.midi - note2.midi
                     sInt = _signedModulo(note1.midi - note2.midi, 12)
                     properties = { 'harmonicInterval': cInt,
@@ -628,14 +700,13 @@ class Database(object):
                     if note1.offset == note2.offset:
                         properties['sameOffset'] = 'True'
                     db._addEdge(note1, 'NoteSimultaneousWithNote', note2, properties)
-                    simuls[note1][note2] = True
         self.addPropertyCallback('Moment', addCrossPartRelationships)
         
         # Spanner
         def addSpannerRelationship(db, span):
             kind = span.__class__.__name__
 #            if kind == 'Moment': return
-            if len(span.getComponents()) > 2:
+            if len(span.getSpannedElements()) > 2:
                 if kind == 'StaffGroup':
                     for i in range(len(span)):
                         part = span[i]
@@ -659,7 +730,7 @@ class Database(object):
             for key, val in objDict.iteritems():
                 if key in self._skipProperties:
                     continue
-                if key in ('vertex', 'position'):
+                if key == 'position':
                     continue # There are empty objects with non-empty positions.
                 if not val:
                     continue
@@ -710,19 +781,23 @@ class Database(object):
     
     def _extractNodes(self, obj, parent=None):
         '''
-        Put all the hierarchical nodes and their relationships into linear order, 
-        and indexes {node: order number} in a dict.
-        If changes need to be made to a node, the dict can be used to find it in the order.
+        Put all the hierarchical nodes and their relationships into linear order.
         At this point relationships store references to the original music21 objects.
         '''
-        if not hasattr(obj, 'parent'):
-            obj.parent = parent
         state = self._extractState
+        nodeLookup = state['nodeLookup']
+#        print obj.__class__.__name__
+        if obj not in nodeLookup:
+            nodeLookup[obj] = {}
+        if parent and ('parent' not in nodeLookup[obj]):
+            nodeLookup[obj]['parent'] = parent
         if state['verbose'] and parent.__class__.__name__ == 'Part':
             state['partItemCnt'] = state.get('partItemCnt', 0) + 1
             self._progressReport(state['partItemCnt'], 0, state['partItemMax'], 0, 75)
         self._addNode(obj)
         if hasattr(obj, 'classes') and 'Spanner' in obj.classes:
+            return
+        if obj.__class__.__name__ == 'Moment':
             return
         try:
             itemList = list(obj)
@@ -733,38 +808,40 @@ class Database(object):
 
     def _addNode(self, node):
         kind = node.__class__.__name__
-        node.vertex = { 'type': kind }
+        nodeLookup = self._extractState['nodeLookup']
+        vertex = nodeLookup[node]['vertex'] = { 'type': kind }
         if hasattr(node, 'offset'):
-            node.vertex['offset'] = node.offset
+            vertex['offset'] = node.offset
         if self._runCallbacks(node) != None:
             return
-        self.nodes.append(node)
-        idx = len(self.nodes) - 1
-        self.nodeLookup[node] = idx
+        self.nodes.append(weakref.ref(node))
+        if 'parent' in nodeLookup[node]:
+            parent = nodeLookup[node]['parent']
+            parentvertex = nodeLookup[parent]['vertex']
+            relation = vertex['type'] + 'In' + parentvertex['type']
+            self._addEdge(node, relation, parent)
+        if 'Spanner' in getattr(node, '_classes', []) or kind == 'Moment':
+            return
         self._extractObject(node)
-        if hasattr(node, 'parent') and node.parent:
-            relation = node.vertex['type'] + 'In' + node.parent.vertex['type']
-            self._addEdge(node, relation, node.parent)
 
     def _addEdge(self, start, relationship, end, propertyNode=None):
         if isinstance(propertyNode, dict):
             properties = propertyNode
-        elif isinstance(propertyNode, base.Music21Object):
-            propertyNode.vertex = {}
+        elif isinstance(propertyNode, base.Music21Object): # in case of Spanners
             self._extractObject(propertyNode)
-            properties = propertyNode.vertex
+            properties = self._extractState['nodeLookup'][propertyNode]['vertex']
         else:
             properties = {}
         properties['type'] = relationship
         edge = [ start, relationship, end, properties ]
         self.edges.append(edge)
     
-    def _editNode(self, item, key, value):
-        idx = self.nodeLookup[item]
-        node = self.nodes[idx]
-        if value == None:
-            value = 'None'
-        node.vertex[key] = value
+#    def _editNode(self, item, key, value):
+#        idx = self.nodeLookup[item]
+#        node = self.nodes[idx]
+#        if value == None:
+#            value = 'None'
+#        node().vertex[key] = value
         
     def _runCallbacks(self, node):
         keys = self._callbacks.keys()
@@ -785,7 +862,10 @@ class Database(object):
                     return rc
 
     def _extractObject(self, obj):
+        if obj.__class__.__name__ == 'Moment':
+            return
         objectDict = obj.__dict__
+        vertex = self._extractState['nodeLookup'][obj]['vertex']
         for key, val in objectDict.iteritems():
             if key in self._skipProperties:
                 continue
@@ -798,20 +878,20 @@ class Database(object):
                 continue
             elif isinstance(val, dict):
                 for key, text in val.iteritems():
-                    obj.vertex[key] = text
+                    vertex[key] = text
                 continue
-            elif isinstance(val, musicxml.base.MusicXMLElement):
+            elif isinstance(val, music21.musicxml.base.MusicXMLElement):
                 continue
             elif hasattr(val, '__dict__'): 
                 self._extractNodes(val, obj)
                 continue
-            if key in ('type', 'vertex', 'parent'):
+            if key == 'type':
                 key = 'm21_' + key
-            obj.vertex[key] = val
-        for key, val in obj.vertex.items():
+            vertex[key] = val
+        for key, val in vertex.items():
             if not isinstance(val, (int, float, long)):
                 val = unicode(val)
-            obj.vertex[key] = val
+            vertex[key] = val
     
     def _writeNodesToDatabase(self):
         '''
@@ -826,32 +906,37 @@ class Database(object):
             sys.stderr.write('Writing nodes to database...........')
             maxNodes = len(self.nodes)
             cnt = 0
-        while self.nodes:
-            subset = self.nodes[:batchSize]
-            del self.nodes[:batchSize]
+        idx = 0
+        nodeLookup = self._extractState['nodeLookup']
+        while idx < len(self.nodes):
+#        while self.nodes:
+            subset = self.nodes[idx:idx+batchSize]
+#            del self.nodes[:batchSize]
             batchLen = len(subset)
-            vertices = [x.vertex for x in subset]
+            vertices = [nodeLookup[x()]['vertex'] for x in subset]
             results = self.graph_db.create(*vertices)
-            # Add a .nodeRef attribute to each music21 object 
+            # Store a nodeRef reference for each music21 object 
             # with the address of its corresponding Neo4j node.
             for i in range(batchLen):
-                subset[i].nodeRef = results[i]
+                nodeLookup[subset[i]()]['nodeRef'] = results[i]
             self._extractState['nodeCnt'] += batchLen
             if verbose:
                 cnt += batchLen
                 self._progressReport(cnt, 0, maxNodes, 75, 85)
+            idx += batchSize
         
-    def _writeEdgesToDatabase(self):
+    def _writeEdgesToDatabase(self, score):
         '''
         Before relationships are written to the database, music21 object references are converted 
         to their corresponding database nodes.
         '''
         batchSize = 100
         verbose = self._extractState['verbose']
+        nodeLookup = self._extractState['nodeLookup']
         edgeRefs = []
         for edge in self.edges:
-            ref1 = edge[0].nodeRef
-            ref2 = edge[2].nodeRef
+            ref1 = nodeLookup[edge[0]]['nodeRef']
+            ref2 = nodeLookup[edge[2]]['nodeRef']
             edgeRef = [ ref1, edge[1], ref2 ]
             # Add a property dictionary, if present.
             if len(edge) > 3:
@@ -861,16 +946,17 @@ class Database(object):
             self._timeUpdate()
             sys.stderr.write('Writing relationships to database...')
             maxEdges = len(edgeRefs)
-            cnt = 0
-        while edgeRefs:
-            subset = edgeRefs[:batchSize]
-            del edgeRefs[:batchSize]
+        idx = 0
+        while idx < len(edgeRefs):
+#        while edgeRefs:
+            subset = edgeRefs[idx:idx+batchSize]
+#            del edgeRefs[:batchSize]
             batchLen = len(subset)
             self.graph_db.create(*subset)
             self._extractState['relationCnt'] += batchLen
             if verbose:
-                cnt = cnt + batchLen
-                self._progressReport(cnt, 0, maxEdges, 85, 100)
+                self._progressReport(self._extractState['relationCnt'], 0, maxEdges, 85, 100)
+            idx += batchSize
         if verbose:
             self._timeUpdate()
 
@@ -887,8 +973,8 @@ class Query(object):
     objects, which are usually created automatically. Note that a starting point
     alone is a complete query structure!
 
-    To get the results and metadata for a query, we use the :meth:`execute`, 
-    :meth:`getResults`, or :meth:`getMetadata` methods.
+    To get the results and metadata for a query, we use the :meth:`results`, 
+    method.
     
     Optionally, we can add a number of restrictions to the search. The
     :meth:`addRelationship` method allows us to connect our start node/relationship to
@@ -903,18 +989,14 @@ class Query(object):
     method to get all of their properties, we can use the :meth:`addReturns`
     method to specify the particular properties we're interested in.
     
-    Results are returned in no apparent order, but we can force the database to return
-    them sorted according to specific properties using the :meth:`setOrder` method. And
-    if we want to limit the number of results, we can use the :meth:`setLimit` method.
-    
     To understand what's going on behind the scenes, 
     it may be helpful to read the documentation on the Neo4j 
     `Cypher query language <http://docs.neo4j.org/chunked/stable/cypher-query-lang.html>`_.
     '''
     
-    _DOC_ORDER = [ 'setStartNode', 'execute', 'getResults', 'getMetadata', 'getResultProperties', 
+    _DOC_ORDER = [ 'setStartNode', 'results', 'getResultProperties', 
                    'setStartRelationship', 'addRelationship', 'addComparisonFilter', 'addCypherFilter', 
-                   'addReturns', 'setOrder', 'setLimit',  'music21Score', 'setObjectCallback' ]
+                   'addReturns', 'setOrder',  'music21Score', 'setObjectCallback' ]
     _DOC_ATTR = {
     'db': 'Blah',
     'results': 'Blah',
@@ -926,11 +1008,12 @@ class Query(object):
     def __init__(self, db):
         self.db = db
         self._constructCallbacks = {}
-        self.results = self.metadata = self.start = None
+        self.start = self.pattern = None
         self.match = []
         self.where = []
         self.orders = []
         self.returns = []
+        self.returnStr = ''
         self.nodes = set()
         self.limit = ''
         self.phrases = {}
@@ -964,41 +1047,23 @@ class Query(object):
         Calling this method again, or calling :meth:`setStartRelationship`, will
         reset the start point for the Query.
         '''
+        self.pattern = None
         if node == None:
             node = Node(self, nodeType=nodeType, name=name)
         if node.id:
             self.start = 'start %s=node(%d)\n' % (node.name, node.id)
         else:
             self.start = 'start %s=node:node_auto_index("type:%s")\n' % (node.name, node.nodeType)
+        self.order = 'order by ID(%s)\n' % node.name
+        self.startId = 'ID(%s)' % node.name 
         return node
-            
-    def execute(self):
+
+    def results(self, minRow=0, limit=20, pattern=None):
         '''
         Executes a query of the database using the current state of the Query object.
         Returns a tuple containing first the results, then the query metadata. 
-        See :meth:`getResults` and :meth:`getMetadata` for information on their contents.
 
-        >>> db = Database()
-        >>> q = Query(db)
-        >>> q.setStartNode(nodeType='Score', name='Score1')
-        Score1
-        >>> print q.execute()
-        ([[Node(http://localhost:7474/db/data/node/...)]], [u'Score1'])
-        '''
-        import py2neo.cypher as cypher
-
-        self.pattern = self._assemblePattern()
-        self.results, meta = cypher.execute(self.db.graph_db, self.pattern, 
-                                                     params={'uniqueness': 'none'})
-        self.metadata = meta.columns
-        return self.results, self.metadata
-    
-    def getResults(self):
-        '''Returns the results of the query as a list of lists. The :meth:`execute` 
-        method is called automatically to obtain the results if it has not already 
-        been called. Each call to this method will return the same list of results
-        until the :meth:`execute` method is called again.
-        
+        The results of the query is a list of lists.
         If the :meth:`addReturns` method was used to specify particular 
         properties, then each result is a list of those properties as text strings.
         
@@ -1010,33 +1075,23 @@ class Query(object):
         passing a result list to the :meth:`getResultProperties` method will add
         all the properties of the objects to the list.
         
-        >>> db = Database()
-        >>> q = Query(db)
-        >>> q.setStartNode(nodeType='Score', name='Score1')
-        Score1
-        >>> print q.getResults()
-        [[Node(http://localhost:7474/db/data/node/...)]]
-        '''
-        if self.results == None:
-            self.execute()
-        return self.results
+        The metadata for the query is a list of the column names.
 
-    def getMetadata(self):
-        '''Returns the metadata for the query (that is, the column names) as a list. The :meth:`execute` 
-        method is called automatically to obtain the results if it has not already 
-        been called. Each call to this method will return the same metadata
-        until the :meth:`execute` method is called again.
-        
         >>> db = Database()
         >>> q = Query(db)
         >>> q.setStartNode(nodeType='Score', name='Score1')
         Score1
-        >>> print q.getMetadata()
-        [u'Score1']
+        >>> print q.results()
+        ([[Node(http://localhost:7474/db/data/node/...)]], [u'Score1'])
         '''
-        if self.metadata == None:
-            self.execute()
-        return self.metadata
+        import py2neo.cypher as cypher
+
+        if not pattern:
+            pattern = self._assemblePattern()
+        results, metadata = cypher.execute(self.db.graph_db, pattern, 
+                                           params={'maxResults': limit, 'minRow': minRow})
+        metadata = metadata.columns
+        return results, metadata
     
     def getResultProperties(self, result):
         '''Takes a list of :class:`py2neo.neo4j.Node` and
@@ -1048,7 +1103,7 @@ class Query(object):
         >>> db = Database()
         >>> q = Query(db)
         >>> score = q.setStartNode(nodeType='Score', name='Score1')
-        >>> rows = q.getResults()
+        >>> rows, meta = q.results()
         >>> nodeInfo = q.getResultProperties(rows[0])[0]
         >>> print sorted(nodeInfo[1].items())
         [(u'_atSoundingPitch', u'unknown'), (u'_priority', 0), (u'corpusFilepath', u'bach/bwv84.5.mxl'), (u'hideObjectOnPrint', False), (u'index', u'bach/bwv84.5.mxl'), (u'offset', 0.0), (u'type', u'Score')]
@@ -1087,12 +1142,15 @@ class Query(object):
         Calling this method again, or calling :meth:`setStartNode`, will
         reset the start point for the Query.
         '''
+        self.pattern = None
         if relation == None:
             relation = Relationship(self, relationType, start, end, name)
         if relation not in self.match and relationType is not None:
             self.addRelationship(relation)
         self.start = ('start %s=relationship:relationship_auto_index("type:%s")\n' 
                       % (relation.name, relation.relationType))
+        self.order = 'order by ID(%s)\n' % relation.name
+        self.startId = 'ID(%s)' % relation.name 
         return relation
     
     def addRelationship(self, relation=None, relationType=None, start=None, end=None, name=None, optional=False):
@@ -1130,6 +1188,7 @@ class Query(object):
         Setting the `optional` argument to True will cause the query pattern to match even
         if this relationship doesn't exist in a particular instance.
         '''
+        self.pattern = None
         if relation == None:
             relation = Relationship(self, relationType, start=start, end=end, name=name, optional=optional)
         self.match.append(relation)
@@ -1137,6 +1196,10 @@ class Query(object):
             if node.nodeType == '*': continue
             self.nodes.add(node)
         return relation
+    
+    def addNode(self, nodeType=None, name=None, nodeId=None):
+        self.pattern = None
+        return Node(self, nodeType, name, nodeId)
     
     def addComparisonFilter(self, pre, operator, post):
         '''Adds a condition to the query that must be true in order for the query to match, and returns
@@ -1167,6 +1230,7 @@ class Query(object):
         In this case the Note object by itself would be enough 
         (using just the :meth:`setStartNode` method).
         '''
+        self.pattern = None
         filt = Filter(self, pre, operator, post)
         if filt not in self.where:
             self.where.append(filt)
@@ -1187,7 +1251,8 @@ class Query(object):
         >>> q = Query(db)
         >>> nSWN = q.setStartRelationship(relationType='NoteSimultaneousWithNote')
         >>> q.addCypherFilter('abs(%s.midi- %s.midi) %% 12 = 7' % (nSWN.start.name, nSWN.end.name))
-        >>> print len(q.getResults())
+        >>> results, meta = q.results(limit=100)
+        >>> print len(results)
         70
         
         But we can create this filter more directly using the `simpleHarmonicInterval` property
@@ -1195,6 +1260,7 @@ class Query(object):
         
             q.addComparisonFilter(nSWN.simpleHarmonicInterval, '=', 7)        
         '''
+        self.pattern = None
         self.where.append(text)
 
     def addReturns(self, *props):
@@ -1214,41 +1280,28 @@ class Query(object):
         >>> q = Query(db)
         >>> nSWN = q.setStartRelationship(relationType='NoteSimultaneousWithNote')
         >>> q.addComparisonFilter(nSWN.simpleHarmonicInterval, '=', 7)
-        >>> q.addReturns(nSWN.start.midi, nSWN.end.midi)   
-        >>> print sorted(q.getResults())[0]
+        >>> q.addReturns(nSWN.start.midi, nSWN.end.midi)
+        >>> results, meta = q.results()
+        >>> print sorted(results)[0]
 
         '''
+        self.pattern = None
         for p in props:
             self.returns.append(p)
-                
-    def setLimit(self, limit):
-        '''Sets the maximum number of results that can be returned from the query.
-        By default, the database will search for all matches to the query.
-        '''
-        self.limit = limit
-        
-    def setOrder(self, propertyObject):
-        '''Specifies that the results should be sorted according to the :class:`Property`
-        given as the argument, and then returned in that order. Property objects can be obtained 
-        by accessing the attributes of :class:`Node` and :class:`Relationship` objects.
-        The list of available properties can be obtained from the :meth:`Database.printStructure` 
-        method.
-        '''
-        self.orders.append(propertyObject)
-        
-    def printResults(self):
-        '''Prints out the results of a query in tab-delimited format with the column names in
-        the first row. If the :meth:`execute` method has not been called, it is called
-        automatically.
-        '''
-        if self.results == None:
-            self.execute()
-        sys.stderr.write('%d results:\n' % len(self.results))
-        print '\t'.join(self.metadata)
-        for row in self.results:
-            print '\t'.join([str(x) for x in row])
 
-    def music21Score(self, resultList):
+#    def printResults(self):
+#        '''Prints out the results of a query in tab-delimited format with the column names in
+#        the first row. If the :meth:`execute` method has not been called, it is called
+#        automatically.
+#        '''
+#        if self.results == None:
+#            self.execute()
+#        sys.stderr.write('%d results:\n' % len(self.results))
+#        print '\t'.join(self.metadata)
+#        for row in self.results:
+#            print '\t'.join([str(x) for x in row])
+
+    def music21Score(self, resultList, metadata=None):
         '''
         Returns a music21 :class:`~music21.stream.Score` object, given a single
         query result (which is by default a list of :class:`py2neo.neo4j.Node`
@@ -1257,10 +1310,15 @@ class Query(object):
         
         The Score will contain its Metadata, all the measures and parts containing the query results,
         and all the objects contained in those measures, but no more than that.  
+
+        If the metadata from the query is included, the score will include
+        information useful for matching query nodes with score objects. Objects
+        in the score that correspond to nodes in the query will have a
+        "queryName" attribute that contains the query column name.
         '''
         self.nodeLookup = {}
         result = resultList[:]
-        self._addHierarchicalNodes(result)
+        self._addHierarchicalNodes(result, metadata)
         result = self.getResultProperties(result)
         nodes = {}
         relations = []
@@ -1268,10 +1326,11 @@ class Query(object):
             if isinstance(itemTuple[0], py2neo.neo4j.Node):
                 if itemTuple[0].id not in nodes:
                     nodes[itemTuple[0].id] = itemTuple
+#                    print itemTuple
             else:
                 relations.append(itemTuple)
         score = stream.Score()
-        scoreNodeId = [x for x in nodes if nodes[1]['type'] == 'Score'][0]
+        scoreNodeId = [x for x in nodes if nodes[x][1]['type'] == 'Score'][0]
         self._addHierarchicalMusic21Data(score, scoreNodeId, nodes, relations)
         return score
 
@@ -1334,7 +1393,7 @@ class Query(object):
                 measure.insert(clef)
             if measureDict['keyIsNew'] == 'True' or firstMeasure:
                 sharps = _convertFromString(measureDict['keySignatureSharps'])
-                keySig = key.KeySignature(sharps)
+                keySig = music21.key.KeySignature(sharps)
                 keySig.mode = _convertFromString(measureDict['keySignatureMode'])
                 measure.insert(keySig)
             if measureDict['timeSignatureIsNew'] == 'True' or firstMeasure:
@@ -1388,7 +1447,7 @@ class Query(object):
             childId = r[0].start_node.id            
             part = self.nodeLookup.get(childId, None)
             if part:
-                staffGroup.addComponents(part)
+                staffGroup.addSpannedElements(part)
             return None
         self.setObjectCallback('PartInStaffGroup', addPartsToStaffGroup)
         
@@ -1425,7 +1484,6 @@ class Query(object):
             return self.classLookup
         import pkgutil
         import inspect
-        import music21
         self.classLookup = {}
         for importer, modname, ispkg in pkgutil.iter_modules(music21.__path__):
             if ispkg: continue
@@ -1446,13 +1504,15 @@ class Query(object):
                 self.m21_classes[mName][cName] = ref
 
     def _assemblePattern(self):
-        for node in self.nodes:
-            self.addComparisonFilter(node.type, '=', node.nodeType)
+#        for node in self.nodes:
+#            self.addComparisonFilter(node.type, '=', node.nodeType)
+        if self.pattern:
+            return self.pattern
         startStr = self.start
         if startStr == None:
             sys.stderr.write('setStartNode() or setStartRelationship() must be called first.\n')
             sys.exit(1)
-        matchStr = whereStr = returnStr = orderStr = limitStr = ''
+        matchStr = whereStr = returnStr = ''
         if self.match:
             matchStr = 'match\n' + ',\n'.join([str(x) for x in self.match]) + '\n'
         if self.where:
@@ -1461,14 +1521,12 @@ class Query(object):
             returnStr = 'return ' + ', '.join([str(x) for x in self.returns]) + '\n'
         else:
             returnStr = 'return *\n'
-        if self.orders:
-            orderStr = 'order by' + ', '.join([str(x) for x in self.orders]) + '\n'
-        if self.limit:
-            limitStr = 'limit %d\n' % self.limit
-        pattern = startStr + matchStr + whereStr + returnStr + orderStr + limitStr
-        return pattern
+        limitStr = 'limit {maxResults}\n'
+        skipStr = 'skip {minRow}\n'
+        self.pattern = startStr + matchStr + whereStr + returnStr + self.order + skipStr + limitStr
+        return self.pattern
 
-    def _addHierarchicalNodes(self, results):
+    def _addHierarchicalNodes(self, results, metadata):
         ''' Fill in a minimal score hierarchy sufficient to contain the notes in the result.
         Then fill in all the other notes in the minimal score.
         Then add one more layer of nodes within the objects in the score 
@@ -1481,31 +1539,31 @@ class Query(object):
         # For each note in the result, fill in the structural nodes above it.
         q = Query(self.db)
         n = Node(q, 'Note')
-        inMeasure = q.addRelationship('NoteInMeasure', start=n)
-        inPart = q.addRelationship('MeasureInPart', start=inMeasure.end)
-        inScore = q.addRelationship('PartInScore', start=inPart.end)
-        q.addRelationship('InstrumentInPart', end=inPart.end, optional=True)
-        q.addRelationship('MetadataInScore', end=inScore.end, optional=True)
-        q.addRelationship('StaffGroupInScore', end=inScore.end, optional=True)
-        for node in results:
-            if node._metadata['data']['type'] != 'Note': continue
-            node.inQuery = True
+        inMeasure = q.addRelationship(relationType='NoteInMeasure', start=n)
+        inPart = q.addRelationship(relationType='MeasureInPart', start=inMeasure.end)
+        inScore = q.addRelationship(relationType='PartInScore', start=inPart.end)
+        q.addRelationship(relationType='InstrumentInPart', end=inPart.end, optional=True)
+        q.addRelationship(relationType='MetadataInScore', end=inScore.end, optional=True)
+        q.addRelationship(relationType='StaffGroupInScore', end=inScore.end, optional=True)
+        for i in range(len(results)):
+            node = results[i]
+            if _getPy2neoMetadata(node)['data']['type'] != 'Note': continue
+            node.queryName = metadata[i]
             n.id = node.id
             q.setStartNode(n)
-            q.execute()
-            subresults = q.getResults()
+            subresults, meta = q.results()
             self._filterNodesAndRelationships(subresults[0], nodes, relations)
         
         # Fill in the other notes in the measures.
-        measures = [x for x in nodes.values() if x._metadata['data']['type'] == 'Measure']
-        self.scoreOffset = sorted([float(x._metadata['data']['offset']) for x in measures])[0]
+        measures = [x for x in nodes.values() if _getPy2neoMetadata(x)['data']['type'] == 'Measure']
+        self.scoreOffset = sorted([float(_getPy2neoMetadata(x)['data']['offset']) for x in measures])[0]
         for m in measures:
             self._addChildren(m, 'NoteInMeasure', nodes, relations)
 
         # Add one more layer of objects below the existing ones.
         rTypes = self.db.listRelationshipTypes()
         for node in nodes.values():
-            nType = node._metadata['data']['type']
+            nType = _getPy2neoMetadata(node)['data']['type']
             inNodeRTypes = [x for x in rTypes if x['end'] == nType]
             for r in inNodeRTypes:
                 rType = r['type']
@@ -1533,8 +1591,8 @@ class Query(object):
         q = Query(self.db)
         n = Node(q, nodeId=node.id)
         q.setStartNode(n)
-        q.addRelationship(rType, end=n)
-        subresults, meta = q.execute()
+        q.addRelationship(relationType=rType, end=n)
+        subresults, meta = q.results(limit=500)
         for result in subresults:
             self._filterNodesAndRelationships(result, nodes, relations)
                     
@@ -1552,8 +1610,10 @@ class Query(object):
             child = self._addMusic21Child(childDict, parent, r)
             if child == None:
                 continue
-            if hasattr(nodes[childId][0], 'inQuery'):
+            queryName = getattr(nodes[childId][0], 'queryName', None)
+            if queryName:
                 child.editorial.color = "red"
+                child.queryName = queryName
             self.nodeLookup[childId] = child
             self._addHierarchicalMusic21Data(child, childId, nodes, relates)
 
@@ -1575,7 +1635,7 @@ class Query(object):
 
     def _addMusic21Properties(self, obj, objDict):
         for key, val in objDict.iteritems():
-            if key in ('type', 'voice'):
+            if key == 'type':
                 continue
             if key.startswith('m21_'):
                 key = key[4:]
@@ -1633,7 +1693,7 @@ class Node(Entity):
     '''An object that represents a database node in a query.
     
     If the Node is created without a nodeType, the node will match any type.
-    The list of available node types is available
+    The list of available node types is can be obtained
     from the :meth:`Database.printStructure` method.
     
     A name attribute will be randomly generated unless a `name` argument
@@ -1760,7 +1820,7 @@ class Filter(Entity):
     def __repr__(self):
         operands = []
         for operand in (self.pre, self.post):
-            if isinstance(operand, (str, bool)):
+            if isinstance(operand, (unicode, str, bool)):
                 text = '"%s"' % operand
                 operands.append(text)
             else:
@@ -1790,7 +1850,7 @@ class Moment(base.Music21Object):
     Note relationships (`NoteStartsAtMoment` and `NoteSustainedAtMoment`).
     
     Typically Moments are added to a score via the :meth:`musicNet.addMomentsToScore` 
-    function. 
+    class method. 
     '''
     
     _DOC_ORDER = ['getComponents', 'addComponents']
@@ -1800,13 +1860,12 @@ class Moment(base.Music21Object):
     'simultaneous': 'A :class:`weakref.WeakSet` referring to any Notes that started before the Moment but hold over into it.'
     }
         
-    def __init__(self, components=None, *arguments):
+    def __init__(self, components=None, sameOffset=None, *arguments):
         base.Music21Object.__init__(self)
         self.sameOffset = weakref.WeakSet()
         self.simultaneous = weakref.WeakSet()
-#        self.nodeRef = None
         if components:
-            self.addComponents(components, *arguments)
+            self.addComponents(components, sameOffset, *arguments)
         
     def getComponents(self):
         '''Returns the contents of the object as a :class:`weakref.WeakSet`. This is simply the
@@ -1814,7 +1873,7 @@ class Moment(base.Music21Object):
         '''
         return self.sameOffset | self.simultaneous
     
-    def addComponents(self, components, *arguments):
+    def addComponents(self, components, sameOffset=None, *arguments):
         '''Adds a :class:`~music21.note.Note` object (or a list of Notes) to the
         object. If a Note has the same offset as this object, a reference to it
         is added to `sameOffset`. Otherwise a reference is added to `simultaneous`.
@@ -1825,11 +1884,16 @@ class Moment(base.Music21Object):
         for c in components:
             if not isinstance(c, note.Note):
                 raise ValueError('cannot add a non-Note object to a Moment')
-            offset = c.getContextByClass('Measure').offset + c.offset
-            if offset == self.offset:
+            if sameOffset == True:
+                self.sameOffset.add(c)
+            elif sameOffset == False:
                 self.sameOffset.add(c)
             else:
-                self.simultaneous.add(c)
+                offset = c.getContextByClass('Measure').offset + c.offset
+                if offset == self.offset:
+                    self.sameOffset.add(c)
+                else:
+                    self.simultaneous.add(c)        
 
 class Test(unittest.TestCase):
 

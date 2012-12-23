@@ -12,19 +12,20 @@ db = Database() #auth_username='dfa639169', auth_password='9253bc680')
 #db.printStructure()
 #sys.exit()
 
-#path = 'bach/bwv84.5.mxl'
+sys.stderr.write('Parsing score...\n')
+path = 'bach/bwv84.5.mxl'
 #path = 'bach/goldbergVariations_bwv988.mxl'
-#s = corpus.parse(path)
+s = corpus.parse(path)
 #print 'adding moments...'
 #print time.ctime()
-#addMomentsToScore(s)
+addMomentsToScore(s)
 ##cProfile.run("db.add(s, index=path)", "profile.txt")
 #print time.ctime()
-#db.addScore(s, index=path, verbose=True)
-#sys.exit()
+db.addScore(s, index=path, verbose=True)
+sys.exit()
 
 works = corpus.getComposer('bach')
-for work in works:
+for work in works[:10]:
     loc = work.find('corpus')
     path = work[loc+7:]
     print '\n' + work
