@@ -312,7 +312,6 @@ class Database(object):
         '''
         self.nodes = []
         self.edges = []
-#        self.nodeLookup = {}
         self._extractState = { 'verbose': verbose,
                               'nodeCnt': 0,
                               'relationCnt': 0,
@@ -431,10 +430,8 @@ class Database(object):
         self.nTypes = set()
         rTypes = set()
         relateTypes = []
-        
         while not relateTypes:
             relateTypes = _serverCall(self.graph_db.get_relationship_types)
-            
         for relateType in relateTypes:
             q = Query(self)
             r = q.setStartRelationship(relationType=relateType)
@@ -691,7 +688,6 @@ class Database(object):
         # Spanner
         def addSpannerRelationship(db, span):
             kind = span.__class__.__name__
-#            if kind == 'Moment': return
             if len(span.getSpannedElements()) > 2:
                 if kind == 'StaffGroup':
                     for i in range(len(span)):
@@ -772,7 +768,6 @@ class Database(object):
         '''
         state = self._extractState
         nodeLookup = state['nodeLookup']
-#        print obj.__class__.__name__
         if obj not in nodeLookup:
             nodeLookup[obj] = {}
         if parent and ('parent' not in nodeLookup[obj]):
@@ -821,14 +816,7 @@ class Database(object):
         properties['type'] = relationship
         edge = [ start, relationship, end, properties ]
         self.edges.append(edge)
-    
-#    def _editNode(self, item, key, value):
-#        idx = self.nodeLookup[item]
-#        node = self.nodes[idx]
-#        if value == None:
-#            value = 'None'
-#        node().vertex[key] = value
-        
+           
     def _runCallbacks(self, node):
         keys = self._callbacks.keys()
         if hasattr(node, 'classes'):
@@ -895,9 +883,7 @@ class Database(object):
         idx = 0
         nodeLookup = self._extractState['nodeLookup']
         while idx < len(self.nodes):
-#        while self.nodes:
             subset = self.nodes[idx:idx+batchSize]
-#            del self.nodes[:batchSize]
             batchLen = len(subset)
             vertices = [nodeLookup[x()]['vertex'] for x in subset]
             results = _serverCall(self.graph_db.create, *vertices)
@@ -934,9 +920,7 @@ class Database(object):
             maxEdges = len(edgeRefs)
         idx = 0
         while idx < len(edgeRefs):
-#        while edgeRefs:
             subset = edgeRefs[idx:idx+batchSize]
-#            del edgeRefs[:batchSize]
             batchLen = len(subset)
             _serverCall(self.graph_db.create, *subset)
             self._extractState['relationCnt'] += batchLen
@@ -1276,18 +1260,6 @@ class Query(object):
         for p in props:
             self.returns.append(p)
 
-#    def printResults(self):
-#        '''Prints out the results of a query in tab-delimited format with the column names in
-#        the first row. If the :meth:`execute` method has not been called, it is called
-#        automatically.
-#        '''
-#        if self.results == None:
-#            self.execute()
-#        sys.stderr.write('%d results:\n' % len(self.results))
-#        print '\t'.join(self.metadata)
-#        for row in self.results:
-#            print '\t'.join([str(x) for x in row])
-
     def music21Score(self, resultList, metadata=None):
         '''
         Returns a music21 :class:`~music21.stream.Score` object, given a single
@@ -1313,7 +1285,6 @@ class Query(object):
             if isinstance(itemTuple[0], py2neo.neo4j.Node):
                 if itemTuple[0].id not in nodes:
                     nodes[itemTuple[0].id] = itemTuple
-#                    print itemTuple
             else:
                 relations.append(itemTuple)
         score = stream.Score()
@@ -1893,10 +1864,6 @@ class TestExternal(unittest.TestCase):
         pass
 
 _DOC_ORDER = [Query, Database, Entity, Node, Relationship, Property, Filter, Moment]
-
-if __name__ == "__main__":
-    _prepDoctests()
-    music21.mainTest(Test)
 
 # This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. 
 # If a copy of the MPL was not distributed with this file, You can obtain one at 

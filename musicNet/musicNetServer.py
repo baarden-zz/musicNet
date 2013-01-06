@@ -659,10 +659,6 @@ def expireTokens():
 if __name__ == "__main__":
     bottle.run(app, host='localhost', port=8080, reloader=True)
     
-
-#    _prepDoctests()
-#    music21.mainTest(Test)
-
 # This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. 
 # If a copy of the MPL was not distributed with this file, You can obtain one at 
 # http://mozilla.org/MPL/2.0/.
