@@ -21,7 +21,7 @@ s = corpus.parse(path)
 addMomentsToScore(s)
 ##cProfile.run("db.add(s, index=path)", "profile.txt")
 #print time.ctime()
-db.addScore(s, index=path, verbose=True)
+db.addScore(s, verbose=True)
 sys.exit()
 
 works = corpus.getComposer('bach')

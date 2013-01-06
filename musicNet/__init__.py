@@ -4,7 +4,7 @@
 # Purpose:      classes for connecting music21 to and searching Neo4j
 #
 # Authors:      Bret Aarden
-# Version:      0.1
+# Version:      0.2
 # Date:         29Jul2012
 #
 # License:      MPL 2.0
@@ -57,12 +57,14 @@ uncommented (the leading hash mark should be deleted) and edited as shown::
 Neo4j operation is nearly plug-and-play. To start the database server from the command line,
 just move to the database directory and enter::
 
-    $ bin/neo4j start    
+    $ bin/neo4j start
+    
+Contents
+------------- 
 '''
 
 #TO DO:
 #LONG TERM:
-#Add RESTful interface using Bottle.
 #Implement a programmatic replacement for Query.addCypherFilter(),
 #  maybe by overriding Python operators, a la SQLAlchemy?
 #Add inspect disk caching.
@@ -88,16 +90,15 @@ from music21 import *
 
 
 def _prepDoctests():
-    '''Execute this function before running doctests. 
-    Results from the tests depend on the state of the database, and there is
-    no way (!?!) to control the order of block testing. This function will
+    '''This function is run before starting doctests. 
+    Results from the tests depend on the state of the database, and this function will
     purge the database and import a sample file.
     '''
     db = Database()
     db.wipeDatabase()
-    bwv84_5 = corpus.parse('bach/bwv84.5.mxl')
+    bwv84_5 = music21.corpus.parse('bach/bwv84.5.mxl')
     addMomentsToScore(bwv84_5)
-    db.addScore(bwv84_5, index='bach/bwv84.5.mxl')
+    db.addScore(bwv84_5)
 
 def addMomentsToScore(score, forceAdd=False):
     '''Adds :class:`Moment` objects to a :class:`~music21.stream.Score`.
@@ -105,13 +106,14 @@ def addMomentsToScore(score, forceAdd=False):
     be able to add vertical note relationships to the database, such as
     `NoteSimultaneousWithNote`, `NoteStartsAtMoment`, and `NoteSustainedAtMoment`.
     
+    >>> from music21 import *
     >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')
     >>> print len(bwv84_5)
     6
     >>> from music21.musicNet import *
     >>> addMomentsToScore(bwv84_5)
     >>> print len(bwv84_5)
-    73
+    71
     '''
     for el in score:
         if el.__class__.__name__ == 'Moment':
@@ -207,6 +209,17 @@ def _convertFromString(val):
             except ValueError: pass
     return val
 
+def _serverCall(func, *args):
+    while True:
+        try:
+            r = func(*args)
+        except py2neo.rest.SocketError:
+            time.sleep(0.2)
+            continue
+        break
+    return r    
+
+
 #-------------------------------------------------------------------------------
 class Database(object):
     '''An object that connects to a Neo4j database, imports music21 scores,
@@ -220,18 +233,20 @@ class Database(object):
     
     >>> db = Database()
     >>> print db.graph_db
-    GraphDatabaseService(http://localhost:7474/db/data/)
+    GraphDatabaseService('http://localhost:7474/db/data/')
     '''
     
     _DOC_ORDER = [ 'wipeDatabase', 'addScore', 'listScores', 'listNodeTypes', 'listNodeProperties', 
-                   'listRelationshipTypes', 'listRelationshipProperties', 'printStructure',
-                   'addPropertyCallback' ]
+                   'listRelationshipTypes', 'listRelationshipProperties', 'addPropertyCallback' ]
     _DOC_ATTR = {
     'graph_db': 'The instance of a :class:`py2neo.neo4j.GraphDatabaseService` object connected to this object, which is in turn connected to a Neo4j server either at the default location on the present computer, or the one specified by the Database `uri` argument.',             
     }
     
     def __init__(self, uri='http://localhost:7474/db/data/', **kwargs):
-        self.graph_db = py2neo.neo4j.GraphDatabaseService(uri, **kwargs)
+        try:
+            self.graph_db = py2neo.neo4j.GraphDatabaseService(uri, **kwargs)
+        except py2neo.rest.SocketError:
+            sys.exit('Unable to connect to database.\n')
         self._db_kwargs = kwargs
         self._db_uri = uri
         self._callbacks = {}
@@ -243,7 +258,7 @@ class Database(object):
                                '_idLastDeepCopyOf', '_mutable', '_elements', '_cache', 'isFlat', 
                                'autosort', '_components', '_unlinkedDuration', 'isSorted', 
                                'flattenedRepresentationOf', '_reprHead', 'idLocal', 'autoSort',
-                               'inherited', '_fullyQualifiedClasses') 
+                               'inherited', '_fullyQualifiedClasses', 'filePath', 'fileFormat', 'fileNumber') 
 
     def wipeDatabase(self):
         '''Removes all relationships and nodes from the database.
@@ -254,32 +269,31 @@ class Database(object):
         0
         >>> print db.graph_db.get_node_count()
         1
-        >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')     #_DOCS_HIDE
-        >>> addMomentsToScore(bwv84_5)                     #_DOCS_HIDE
-        >>> db.addScore(bwv84_5, index='bach/bwv84.5.mxl') #_DOCS_HIDE
+        >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')  #_DOCS_HIDE
+        >>> addMomentsToScore(bwv84_5)                  #_DOCS_HIDE
+        >>> db.addScore(bwv84_5)                        #_DOCS_HIDE
 
         The node count can never go below 1 because Neo4j always keeps a reference node 
         in its network graph.
         '''
         q = Query(self)
         q.setStartRelationship()
-        while (self.graph_db.get_relationship_count()):
+        while (_serverCall(self.graph_db.get_relationship_count)):
             results, meta = q.results(limit=100)
             results = [x[0] for x in results]
-            self.graph_db.delete(*results)
+            _serverCall(self.graph_db.delete, *results)
         q = Query(self)
         q.setStartNode()
-        while (self.graph_db.get_node_count() > 1):
+        while (_serverCall(self.graph_db.get_node_count) > 1):
             results, meta = q.results(limit=100)
             results = [x[0] for x in results]
-            self.graph_db.delete(*results)
+            _serverCall(self.graph_db.delete, *results)
 
-    def addScore(self, score, index=None, verbose=False):
+    def addScore(self, score, verbose=False):
         '''Adds a music21 :class:`~music21.stream.Score` to the database.
         In case the score does not contain :class:`~music21.metadata.Metadata` information
-        about the name of the score, or if we want a standardized name for each score,
-        we can add an `index` argument, which will become a property on the score node. 
-        To see progress on the import, we can set the `verbose` argument to `True`.
+        about the name of the score. To see progress on the import, we can set the 
+        `verbose` argument to `True`.
         
         In order to be able to access vertical note relationships such as
         `NoteSimultaneousWithNote`, `NoteStartsAtMoment`, and `NoteSustainedAtMoment`,
@@ -290,11 +304,11 @@ class Database(object):
         >>> db.wipeDatabase() #_DOCS_HIDE
         >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')
         >>> addMomentsToScore(bwv84_5)
-        >>> db.addScore(bwv84_5, index='bach/bwv84.5.mxl')
+        >>> db.addScore(bwv84_5)
         >>> print db.graph_db.get_node_count()
-        459
+        457
         >>> print db.graph_db.get_relationship_count()
-        1519
+        1517
         '''
         self.nodes = []
         self.edges = []
@@ -304,8 +318,6 @@ class Database(object):
                               'relationCnt': 0,
                               'nodeLookup': {} } #vertex, parent, voice
         import copy
-        if index:
-            score.index = index
         if verbose:
             self.lastProgress = 0
             self._timeUpdate(report=False)
@@ -317,12 +329,13 @@ class Database(object):
 
     def listScores(self, start=0, limit=100):
         '''Returns a list of dict objects with information about the scores that have been added 
-        to the database, with keys for `movementName`, `_names` (a list of 
-        contributor/composer names), and `index`.
+        to the database, with keys for `movementName` and `_names` (a list of 
+        contributor/composer names).
 
         >>> db = Database()
-        >>> expectedScores = [{u'index': u'bach/bwv84.5.mxl', u'_names': [None], u'movementName': u'bwv84.5.mxl'}]
-        >>> db.listScores() == expectedScores
+        >>> expectedScore = [(u'_names', [None]), (u'corpusFilepath', u'bach/bwv84.5.mxl'), (u'movementName', u'bwv84.5.mxl')]
+        >>> scores = db.listScores()
+        >>> sorted(scores[0].items()) == expectedScore
         True
         '''
         q = Query(self)
@@ -331,7 +344,7 @@ class Database(object):
         meta = inScore.start
         inMetadata = q.addRelationship(relationType='ContributorInMetaData', end=meta, optional=True)
         contributor = inMetadata.start
-        q.addReturns(meta.movementName, contributor._names, score.index)
+        q.addReturns(meta.movementName, contributor._names, score.corpusFilepath)
         results, meta = q.results(start, limit)
         columns = [x[x.find('.') + 1:] for x in meta]
         scores = {}
@@ -374,7 +387,7 @@ class Database(object):
         >>> db = Database()
         >>> props = db.listNodeProperties()
         >>> print sorted( [x for x in props if x[0]=='Score'] )
-        [(u'Score', u'_atSoundingPitch'), (u'Score', u'_priority'), (u'Score', u'corpusFilepath'), (u'Score', u'hideObjectOnPrint'), (u'Score', u'index'), (u'Score', u'offset')]
+        [(u'Score', u'_atSoundingPitch'), (u'Score', u'_priority'), (u'Score', u'corpusFilepath'), (u'Score', u'hideObjectOnPrint'), (u'Score', u'offset')]
         '''
         if hasattr(self, 'nodeProperties'):
             return self.nodeProperties
@@ -386,7 +399,7 @@ class Database(object):
             q.setStartNode(nodeType=nodeType)
             results, meta = q.results(limit=50)
             results = [x[0] for x in results]
-            nodes = self.graph_db.get_properties(*results)
+            nodes = _serverCall(self.graph_db.get_properties, *results)
             properties = set()
             for node in nodes:
                 for prop in node:
@@ -417,7 +430,11 @@ class Database(object):
         self.rTypes = []
         self.nTypes = set()
         rTypes = set()
-        relateTypes = self.graph_db.get_relationship_types()
+        relateTypes = []
+        
+        while not relateTypes:
+            relateTypes = _serverCall(self.graph_db.get_relationship_types)
+            
         for relateType in relateTypes:
             q = Query(self)
             r = q.setStartRelationship(relationType=relateType)
@@ -454,7 +471,7 @@ class Database(object):
             q.setStartRelationship(relationType=rType)
             results, meta = q.results(limit=50)
             results = [x[0] for x in results]
-            nodes = self.graph_db.get_properties(*results)
+            nodes = _serverCall(self.graph_db.get_properties, *results)
             properties = set()
             for relate in results:
                 for prop in relate:
@@ -463,37 +480,6 @@ class Database(object):
             for p in properties:
                 self.relateProperties.append( (rType, p) )
         return self.relateProperties
-
-    def printStructure(self):
-        '''This is a wrapper for three other methods: it prints the output
-        from :meth:`listRelationshipTypes`, :meth:`listNodeProperties`,
-        :meth:`listRelationshipProperties` in a long but readable list.
-        '''
-        print '\nThe following relationships are available in the database:'
-        rList = []
-        rTypes = self.listRelationshipTypes()
-        for r in rTypes:
-            rList.append('(%s)-[:%s]->(%s)' % (r['start'], r['type'], r['end']))
-        rList.sort()
-        for relation in rList:
-            print relation
-
-        print '\nThe following node properties are available in the database:'
-        properties = self.listNodeProperties()
-        last = ''
-        for nodeType, prop in properties:
-            if nodeType != last:
-                print nodeType
-            print '  .%s' % prop
-            last = nodeType
-
-        print '\nThe following relationship properties are available in the database:'
-        properties = self.listRelationshipProperties()
-        for rType, prop in properties:
-            if rType != last:
-                print rType
-            print '  .%s' % prop
-            last = rType
 
     def addPropertyCallback(self, entity, callback):
         '''**For advanced use only.**
@@ -914,7 +900,7 @@ class Database(object):
 #            del self.nodes[:batchSize]
             batchLen = len(subset)
             vertices = [nodeLookup[x()]['vertex'] for x in subset]
-            results = self.graph_db.create(*vertices)
+            results = _serverCall(self.graph_db.create, *vertices)
             # Store a nodeRef reference for each music21 object 
             # with the address of its corresponding Neo4j node.
             for i in range(batchLen):
@@ -952,7 +938,7 @@ class Database(object):
             subset = edgeRefs[idx:idx+batchSize]
 #            del edgeRefs[:batchSize]
             batchLen = len(subset)
-            self.graph_db.create(*subset)
+            _serverCall(self.graph_db.create, *subset)
             self._extractState['relationCnt'] += batchLen
             if verbose:
                 self._progressReport(self._extractState['relationCnt'], 0, maxEdges, 85, 100)
@@ -1082,14 +1068,14 @@ class Query(object):
         >>> q.setStartNode(nodeType='Score', name='Score1')
         Score1
         >>> print q.results()
-        ([[Node(http://localhost:7474/db/data/node/...)]], [u'Score1'])
+        ([[Node('http://localhost:7474/db/data/node/...')]], [u'Score1'])
         '''
         import py2neo.cypher as cypher
 
         if not pattern:
             pattern = self._assemblePattern()
-        results, metadata = cypher.execute(self.db.graph_db, pattern, 
-                                           params={'maxResults': limit, 'minRow': minRow})
+        results, metadata = _serverCall(cypher.execute, self.db.graph_db, pattern, 
+                                        {'maxResults': limit, 'minRow': minRow})
         metadata = metadata.columns
         return results, metadata
     
@@ -1106,9 +1092,9 @@ class Query(object):
         >>> rows, meta = q.results()
         >>> nodeInfo = q.getResultProperties(rows[0])[0]
         >>> print sorted(nodeInfo[1].items())
-        [(u'_atSoundingPitch', u'unknown'), (u'_priority', 0), (u'corpusFilepath', u'bach/bwv84.5.mxl'), (u'hideObjectOnPrint', False), (u'index', u'bach/bwv84.5.mxl'), (u'offset', 0.0), (u'type', u'Score')]
+        [(u'_atSoundingPitch', u'unknown'), (u'_priority', 0), (u'corpusFilepath', u'bach/bwv84.5.mxl'), (u'hideObjectOnPrint', False), (u'offset', 0.0), (u'type', u'Score')]
         '''
-        props = self.db.graph_db.get_properties(*result)
+        props = _serverCall(self.db.graph_db.get_properties, *result)
         return zip(result, props)
 
     def setStartRelationship(self, relation=None, relationType=None, start=None, end=None, name=None):
@@ -1183,7 +1169,7 @@ class Query(object):
         >>> measure = Node(q, 'Measure', name='Measure1')
         >>> mIP = q.addRelationship(relationType='MeasureInPart', name='MIP1', start=measure, end=pIS.start)
         >>> print mIP
-        (Measure1)-[MIP1:MeasureInPart]->(Part1)                
+        (Measure1)-[MIP1:MeasureInPart]->(Part1)
         
         Setting the `optional` argument to True will cause the query pattern to match even
         if this relationship doesn't exist in a particular instance.
@@ -1237,8 +1223,9 @@ class Query(object):
         return filt
         
     def addCypherFilter(self, text):
-        '''**For advanced use. This method will be probably be deprecated in future versions.**
-
+        '''
+        **For advanced use. This method will be probably be deprecated in future versions.**
+        
         Adds a condition written in 
         `Cypher <http://docs.neo4j.org/chunked/milestone/query-where.html>`_ to the query.
         This method is provided for complex queries that require filters more complicated
@@ -1256,9 +1243,9 @@ class Query(object):
         70
         
         But we can create this filter more directly using the `simpleHarmonicInterval` property
-        of `NoteSimultaneousWithNote` relationships::
+        of `NoteSimultaneousWithNote` relationships:
         
-            q.addComparisonFilter(nSWN.simpleHarmonicInterval, '=', 7)        
+        >>> f = q.addComparisonFilter(nSWN.simpleHarmonicInterval, '=', 7)        
         '''
         self.pattern = None
         self.where.append(text)
@@ -1279,11 +1266,11 @@ class Query(object):
         >>> db = Database()
         >>> q = Query(db)
         >>> nSWN = q.setStartRelationship(relationType='NoteSimultaneousWithNote')
-        >>> q.addComparisonFilter(nSWN.simpleHarmonicInterval, '=', 7)
+        >>> f = q.addComparisonFilter(nSWN.simpleHarmonicInterval, '=', 7)
         >>> q.addReturns(nSWN.start.midi, nSWN.end.midi)
-        >>> results, meta = q.results()
-        >>> print sorted(results)[0]
-
+        >>> r, meta = q.results()
+        >>> sorted([sorted(x) for x in r])[0]
+        [42, 61]
         '''
         self.pattern = None
         for p in props:

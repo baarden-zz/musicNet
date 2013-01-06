@@ -1,7 +1,7 @@
 #!/usr/bin/python
 #-------------------------------------------------------------------------------
-# Name:         musicNetBottle.py
-# Purpose:      a Bottle app providing a RESTful interface 
+# Name:         musicNetServer.py
+# Purpose:      a Python app providing a RESTful interface 
 #               to the musicNet classes
 #
 # Authors:      Bret Aarden
@@ -15,21 +15,23 @@
 '''
 This is an app that provides a RESTful JSON interface to the music21.musicNet objects.
 Any client with the ability to send/receive JSON can use a remote
-server running this app to execute queries and return the results. It requires that
-the Python Bottle module be installed.
+server running this app to execute queries and return the results. It's dependent on
+the Python Bottle module. (Doctests are dependent on the webtest module.)
 
 Services with a result containing multiple rows return each row as a separate JSONItem:
 rather than returning one JSON document containing an array, each line
-is a separate JSON document containing one item. Any service may return
+is a separate JSON document containing one row. Any service may return
 a JSONItem dictionary with an 'error'/error message key/value pair, so
 clients should check for this possibility.
 
 Only query-related services are exposed by this interface. Actions that manipulate 
 the database can only be done on the server using the musicNet objects directly.
 
-The app is built with the Bottle framework and will start using its default options.
+The app is built with the Bottle framework and will start using its default options
+(localhost:8080).
 
-Here is a list of the available services:
+Services
+========
 '''
 
 import os
@@ -39,32 +41,72 @@ import tempfile
 import Queue
 import threading
 import bottle
-import py2neo
 import music21
 import music21.musicNet
 
-ENDOFQUEUE = -1
+
+## {{{ http://code.activestate.com/recipes/577564/ (r2) 
+class Silence:
+
+    def __init__(self, stdout=os.devnull, stderr=os.devnull, mode='w'):
+        self.outfiles = stdout, stderr
+        self.combine = (stdout == stderr)
+        self.mode = mode
+ 
+    def __enter__(self):
+        import sys
+        self.sys = sys
+        # save previous stdout/stderr
+        self.saved_streams = saved_streams = sys.__stdout__, sys.__stderr__
+        self.fds = fds = [s.fileno() for s in saved_streams]
+        self.saved_fds = map(os.dup, fds)
+        # flush any pending output
+        for s in saved_streams: s.flush()
+ 
+        # open surrogate files
+        if self.combine: 
+            null_streams = [open(self.outfiles[0], self.mode, 0)] * 2
+            if self.outfiles[0] != os.devnull:
+                # disable buffering so output is merged immediately
+                sys.stdout, sys.stderr = map(os.fdopen, fds, ['w']*2, [0]*2)
+        else: null_streams = [open(f, self.mode, 0) for f in self.outfiles]
+        self.null_fds = null_fds = [s.fileno() for s in null_streams]
+        self.null_streams = null_streams
+ 
+        # overwrite file objects and low-level file descriptors
+        map(os.dup2, null_fds, fds)
+ 
+    def __exit__(self, *args):
+        sys = self.sys
+        # flush any pending output
+        for s in self.saved_streams: s.flush()
+        # restore original streams and file descriptors
+        map(os.dup2, self.saved_fds, self.fds)
+        sys.stdout, sys.stderr = self.saved_streams
+        # clean up
+        for s in self.null_streams: s.close()
+        return False
+## end of http://code.activestate.com/recipes/577564/ }}}
 
 
 class GeneratePreviews(threading.Thread):
-    ''' A threading class for producing previews in the background.
-    '''
     
-    def __init__(self, queue, out_queue):
+    def __init__(self, inQueue, outQueue):
         threading.Thread.__init__(self)
-        self.queue = queue
-        self.outQueue = out_queue
+        self.daemon = True
+        self.inQueue = inQueue
+        self.outQueue = outQueue
 
     def run(self):
         while True:
             try:
-                scoreDict = self.queue.get_nowait()
+                scoreDict = self.inQueue.get_nowait()
             except Queue.Empty:
                 time.sleep(0.25)
                 continue
             path = self.makePreview(scoreDict['score'])
-            imageDict = { 'idx': scoreDict['line'], 'path': path, 'token': scoreDict['token'] }
-            self.queue.task_done()
+            imageDict = { 'index': scoreDict['index'], 'path': path, 'token': scoreDict['token'] }
+            self.inQueue.task_done()
             self.outQueue.put(imageDict)
     
     def makePreview(self, score):
@@ -77,9 +119,13 @@ class GeneratePreviews(threading.Thread):
         conv.loadFromMusic21Object(score)
         header = [x for x in conv.context.contents if isinstance(x, music21.lily.lilyObjects.LyLilypondHeader)][0]
         header.lilypondHeaderBody = 'tagline = ""'
-        conv.createPNG(filename)
+        with Silence():
+            conv.createPNG(filename)
         return os.path.basename(filename + '.png')
 
+#-------------------------------------------------------------------------------
+# musicNetServer
+#-------------------------------------------------------------------------------
 
 bottle.debug(True)
 app = bottle.Bottle()
@@ -94,23 +140,41 @@ previewGen = GeneratePreviews(inQueue, outQueue)
 previewGen.daemon = True
 previewGen.start()
 
+'''
+listScores
+----------
+'''
 
 @app.get('/listscores')
 def listScores():
-    '''/listscores?start=0&limit=100
+    '''
+    Server address::
+ 
+        /listscores?start=0&limit=100
     
-    Request parameters:
+    Request parameters::
     
         start - The first row of scores to return (default=0).
         limit - The number of scores to return (default=100).
     
     Response: a JSONItem dictionary for each score in the database.
     
-    Data structure:
+    Data structure::
 
         { movementName: name_of_score_file, _names: [ contributor, ... ], index: original_path_of_score_file }
         { movementName: name_of_score_file, _names: [ contributor, ... ], index: original_path_of_score_file }
         ...
+    
+    We can test the functioning of the app without actually starting it by using the :class:`webtest`
+    framework:
+    
+    >>> from webtest import TestApp
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = TestApp(mns.app)
+    >>> r = webapp.get('/listscores')
+    >>> import json
+    >>> sorted(json.loads(r.body).items())
+    [(u'_names', [None]), (u'corpusFilepath', u'bach/bwv84.5.mxl'), (u'movementName', u'bwv84.5.mxl')]
     '''
     query = bottle.request.query
     start = int(query.start or 0)
@@ -119,37 +183,68 @@ def listScores():
     for row in rows:
         yield json.dumps(row) + '\n'
 
+'''
+listNodeTypes
+-------------
+'''     
 @app.get('/listnodetypes')
 def listNodeTypes():
-    '''/listnodetypes
+    '''    
+    Server address::
+ 
+        /listnodetypes
     
     Request parameters: none.
     
     Response: a JSON array of node types in the database.
     
-    Data structure:
+    Data structure::
 
         [ 'score', 'metadata', 'note', ... ]
+        
+    Example:
+
+    >>> from webtest import TestApp
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = TestApp(mns.app)
+    >>> r = webapp.get('/listnodetypes')
+    >>> import json
+    >>> json.loads(r.body)
+    [u'StaffGroup', u'SystemLayout', u'Beam', u'Score', u'Rest', u'Note', u'Instrument', u'Moment', u'Part', u'Measure', u'Barline', u'Expression', u'Metadata']
     '''
     types = list(app.db.listNodeTypes())
     return json.dumps(types) + '\n'
 
 @app.get('/listnodeproperties')
 def listNodeProperties():
-    '''/listnodeproperties
+    '''
+    Server address::
+ 
+        /listnodeproperties
     
     Request parameters: none.
     
     Response: 
     
-        A 2-element JSONItem array for each kind of note property in the database 
-    
-    Data structure:
+        A JSON array for each node property type in the database. The first element is the node
+        type, and the second element is the name of the property.
+        
+    Data structure::
     
         ['StaffGroup', 'offset']
         ['SystemLayout', 'distance']
         ['SystemLayout', 'quarterLength']
         ...
+    
+    Example:
+
+    >>> from webtest import TestApp
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = TestApp(mns.app)
+    >>> r = webapp.get('/listnodeproperties')
+    >>> import json
+    >>> json.loads(r.body.splitlines()[0])
+    [u'StaffGroup', u'offset']
     '''
     rows = app.db.listNodeProperties()
     for row in rows:
@@ -157,19 +252,33 @@ def listNodeProperties():
 
 @app.get('/listrelationshiptypes')
 def listRelationshipTypes():
-    '''/listrelationshiptypes
+    '''
+    Server address::
+ 
+        /listrelationshiptypes
     
     Request parameters: none.
     
     Response: 
     
-        A JSONItem dictionary for each kind of relationship property in the database 
+        A JSONItem dictionary for each kind of relationship in the database, including
+        the type of node at the start and end of the relationship.
     
-    Data structure:
+    Data structure::
     
-        {'start': 'Note', 'end': 'Measure', 'type': 'NoteInMeasure'}
-        {'start': 'Part', 'end': 'Score', 'type': 'PartInScore'}
+        {'start': u'Note', 'end': u'Measure', 'type': u'NoteInMeasure'}
+        {'start': u'Part', 'end': u'Score', 'type': u'PartInScore'}
         ...
+    
+    Example:
+
+    >>> from webtest import TestApp
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = TestApp(mns.app)
+    >>> r = webapp.get('/listrelationshiptypes')
+    >>> import json
+    >>> json.loads(r.body.splitlines()[0])
+    {u'start': u'Note', u'end': u'Measure', u'type': u'NoteInMeasure'}
     '''
     rows = app.db.listRelationshipTypes()
     for row in rows:
@@ -177,32 +286,49 @@ def listRelationshipTypes():
 
 @app.get('/listrelationshipproperties')
 def listRelationshipProperties():
-    '''/listrelationshipproperties
+    '''
+    Server address::
+ 
+        /listrelationshipproperties
     
     Request parameters: none.
     
     Response: 
     
-        A 2-element JSONItem array for each kind of Relationship in the database 
+        A 2-element JSONItem array for each kind of Relationship property in the database:
+        the first item is the Relationship type, and the second is the name of the property.
     
-    Data structure:
+    Data structure::
     
         ['NoteToNoteByBeat', 'interval']
         ['NoteToNote', 'interval']
         ...
+        
+    Example:
+
+    >>> from webtest import TestApp
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = TestApp(mns.app)
+    >>> r = webapp.get('/listrelationshiptypes')
+    >>> import json
+    >>> sorted(json.loads(r.body.splitlines()[0]).items())
+    [(u'end', u'Measure'), (u'start', u'Note'), (u'type', u'NoteInMeasure')]
     '''
     rows = app.db.listRelationshipProperties()
     for row in rows:
         yield json.dumps(row) + '\n'
 
 @app.get('/images/<filename:re:.*\.png>#')
-def send_image(filename):
+def sendImage(filename):
     tempdir = tempfile.gettempdir()
     return bottle.static_file(filename, root=tempdir, mimetype='image/png')
 
 @app.post('/submitquery')
 def prepareQuery():
-    '''/submitquery
+    '''
+    Server address::
+ 
+        /submitquery
     
     This service processes a JSON query and returns an integer token that can be used
     to obtain results using 'getresults' and 'getimages'. Unlike
@@ -246,10 +372,10 @@ def prepareQuery():
         specify returns are not compatible with the 'makePreviews' option.
         Preview URLs can be obtained from the getimage service.
     
-    For instance,
+    For instance::
     
         { 'nodes': [ { 'type': 'Note', 'name': 'n1' },
-                     { 'type': 'Note', 'name': 'n2' } ]
+                     { 'type': 'Note', 'name': 'n2' } ],
           'relationships': [ { 'start': 'n1', 'type': 'NoteSimultaneousWithNote', 'end': 'n2', 'name': 'nswn' } ],
           'startNode': 'n1',
           'relationshipProperties': [ { 'relationship': 'nswn', 'property': 'sameOffset', 'name': 'nswnSo' },
@@ -259,10 +385,21 @@ def prepareQuery():
           'returns': [],
           'makePreviews': 'True'
         }
-        
-    Data structure:
+    
+    Data structure::
     
         {'token': -4258737148674360350}
+        
+    Example:
+
+    >>> import webtest
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = webtest.TestApp(mns.app)
+    >>> req = { 'nodes': [ { 'type': 'Note', 'name': 'n1' } ], 'startNode': 'n1' }
+    >>> import json
+    >>> r = webapp.post_json('/submitquery', req)
+    >>> json.loads(r.body)
+    {u'token': ...}
     '''
     req = bottle.request.json
     q = music21.musicNet.Query(app.db)
@@ -305,16 +442,20 @@ def prepareQuery():
     if previews and q.returns:
         return { 'error': '"makePreviews" and "results" cannot be combined in the same query' }
     pattern = q._assemblePattern()
-    token = hash(pattern)
+    ipAddr = bottle.request.remote_addr or "None"
+    token = hash(ipAddr + pattern)
     app.tokens[token] = [pattern, previews, time.time()]
     expireTokens()
     return { 'token': token }
     
 @app.get('/getresults')
 def results():
-    '''/getresults?token=nnn&row=0&limit=10
+    '''
+    Server address::
+     
+        /getresults?token=nnn&row=0&limit=10
     
-    Request parameters:
+    Request parameters::
 
         token - The number returned by the submitquery service
         row   - The first row of the query to return (default=0)
@@ -325,19 +466,32 @@ def results():
         A series of JSONItem dictionaries: first the metadata for the
         results (the list of column names), then the data rows.
         A 'type' key indicates the kind of row, and the information
-        is indexed by the 'data' key. Data rows also have a 'line'
+        is indexed by the 'data' key. Data rows also have a 'index'
         key indicating the line number of the result.
         
         A typical strategy is to send requests to this service,
         incrementing the row by the limit each time, until it
         returns an empty response.
     
-    Data structure:
+    Data structure::
     
         {'type': 'metadata', 'data': ['nswn', 'p2', 'n1', 'p1', 'ntn1', 'n2', 'ntn2', 'p1', 'm1']}
-        {'type': 'data', 'line': 0, 'data': [7, 'D4', 'F#4', 'B4', -5, 'B3', -3, 'Soprano', 'Tenor', 5]}
-        {'type': 'data', 'line': 1, 'data': [19, 'B3', 'C#5', 'D5', -1, 'F#3', -5, 'Soprano', 'Bass', 6]}
+        {'type': 'data', 'index': 0, 'data': [7, 'D4', 'F#4', 'B4', -5, 'B3', -3, 'Soprano', 'Tenor', 5]}
+        {'type': 'data', 'index': 1, 'data': [19, 'B3', 'C#5', 'D5', -1, 'F#3', -5, 'Soprano', 'Bass', 6]}
         ...
+        
+    Example:
+        
+    >>> import webtest
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = webtest.TestApp(mns.app)
+    >>> req = { 'nodes': [ { 'type': 'Note', 'name': 'n1' } ], 'startNode': 'n1' }
+    >>> r = webapp.post_json('/submitquery', req)
+    >>> import json
+    >>> token = json.loads(r.body)['token']
+    >>> r = webapp.get('/getresults?token=%s&start=0&limit=1' % token)
+    >>> sorted(json.loads(r.body.splitlines()[0]).items())
+    [(u'data', [u'n1']), (u'type', u'metadata')]
     '''
     args = bottle.request.query
     token = int(args.token)
@@ -349,24 +503,13 @@ def results():
         raise StopIteration
     pattern, previews, timestamp = app.tokens[token]
     q = music21.musicNet.Query(app.db)
-    attempt = 0
-    while True:
-        try:
-            data, metadata = q.results(minRow, limit, pattern)
-            break
-        except py2neo.rest.SocketError:
-            attempt += 1
-            if attempt > 3:
-                item = { 'error': 'Unable to contact Neo4j server. Please contact the site administrator.' }
-                yield json.dumps(item) + '\n'
-                raise StopIteration
-            time.sleep(1)
+    data, metadata = q.results(minRow, limit, pattern)
     for idx in range(len(data)):
         row = data[idx]
         queryIdx = idx + minRow
         if previews:
             score = q.music21Score(row, metadata)
-            inQueue.put({ 'line': queryIdx, 'score': score, 'token': token })
+            inQueue.put({ 'index': queryIdx, 'score': score, 'token': token })
             addScoreInfo(score, row, metadata, idx)
         else:
             for i in range(len(row)):
@@ -375,23 +518,27 @@ def results():
         if idx == 0:  # wait until after previews have added data to return metadata
             item = { 'type': 'metadata', 'data': metadata }
             yield json.dumps(item) + '\n'
-        item = { 'type': 'data', 'line': queryIdx, 'data': row }
+        item = { 'type': 'data', 'index': queryIdx, 'data': row }
         yield json.dumps(item) + '\n'
     expireTokens()
 
 @app.get('/getimages')
 def getImage():
-    '''/getimages?token=nnn
-    
-    Request parameters:
+    '''
+    Server address::
+ 
+        /getimages?token=nnn&block=false
+
+    Request parameters::
 
         token - The number returned by the submitquery service
+        block - [optional] if true, the query will block for a response
     
     Response: 
     
-        Zero or more JSONItem objects. The 'url' key/value pair
+        Zero or more JSONItem objects. The 'path' key/value pair
         contains the path that an HTTP request can use to obtain the
-        preview PNG. A 'line' key/value indicates the corresponding query
+        preview PNG. An 'index' key/value indicates the corresponding query
         result row for this image. A 'type' key indicating that this is a
         'preview' is included in case it's useful.
         
@@ -401,40 +548,61 @@ def getImage():
         2-4 times a second is probably not useful.
         Previews are generated after a call to the result service.
     
-    Data structure:
+    Data structure::
     
-        {'url': '/images/previewJHUqde.png', 'line': 0, 'type': 'preview'}
-        {'url': '/images/previewriWX1Z.png', 'line': 1, 'type': 'preview'}
-        {'url': '/images/previewf0PvMb.png', 'line': 2, 'type': 'preview'}
+        {'url': '/images/previewJHUqde.png', 'index': 0, 'type': 'preview'}
+        {'url': '/images/previewriWX1Z.png', 'index': 1, 'type': 'preview'}
+        {'url': '/images/previewf0PvMb.png', 'index': 2, 'type': 'preview'}
         ...
+        
+    Example:
+
+    >>> import webtest
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = webtest.TestApp(mns.app)
+    >>> req = { 'nodes': [ { 'type': 'Note', 'name': 'n2' } ], 'startNode': 'n2', 'makePreviews': True }
+    >>> r = webapp.post_json('/submitquery', req)
+    >>> import json
+    >>> token = json.loads(r.body)['token']
+    >>> r = webapp.get('/getresults?token=%s&start=0&limit=1' % token)
+    >>> r = webapp.get('/getimages?token=%s&block=true' % token)                # doctest: +SKIP
+    >>> sorted(json.loads(r.body).items())                                      # doctest: +SKIP
+    [(u'index', 0), (u'type', u'preview'), (u'url', u'/images/preview...png')]  # doctest: +SKIP
     '''
     token = int(bottle.request.query.token)
     if token not in app.tokens:
         item = { 'error': 'That token is invalid or has expired.' }
         yield json.dumps(item) + '\n'
         raise StopIteration
-    previews = app.tokens[token][1]
-    if not previews:
+    makePreviews = app.tokens[token][1]
+    if not makePreviews:
         item = { 'error': 'makePreviews was not set in the query submission.' }
         yield json.dumps(item) + '\n'
         raise StopIteration
+    if bottle.request.query.block:
+        imageDict = outQueue.get()
+        outQueue.task_done()
+        addImage(imageDict)
     while True:
         try:
             imageDict = outQueue.get_nowait()
         except Queue.Empty:
             break
         outQueue.task_done()
-        imgToken = imageDict['token']
-        try:
-            app.images[imgToken].append(imageDict)
-        except KeyError:
-            app.images[imgToken] = [imageDict]
+        addImage(imageDict)
     images = app.images.pop(token, [])
     while images:
         imageDict = images.pop(0)
-        item = { 'type': 'preview', 'line': imageDict['idx'], 'url': '/images/' + imageDict['path'] }
+        item = { 'type': 'preview', 'index': imageDict['index'], 'url': '/images/' + imageDict['path'] }
         yield json.dumps(item) + '\n'
     expireTokens()
+    
+def addImage(imageDict):
+    imgToken = imageDict['token']
+    try:
+        app.images[imgToken].append(imageDict)
+    except KeyError:
+        app.images[imgToken] = [imageDict]
 
 def addComparisonFilter(query, comparison, properties):
     pre = comparison['pre']
@@ -473,11 +641,20 @@ def objectValueMap(obj):
         return '-'
 
 def expireTokens():
-    ''' Remove tokens that are older than 30 minutes.
-    '''
+    # Remove tokens that are older than 30 minutes.
     for token in app.tokens:
         if app.tokens[token][2] - time.time() > 1800:
             del app.tokens[token]
 
 
-bottle.run(app, host='localhost', port=8080, reloader=True)
+if __name__ == "__main__":
+    bottle.run(app, host='localhost', port=8080, reloader=True)
+    
+
+#    _prepDoctests()
+#    music21.mainTest(Test)
+
+# This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. 
+# If a copy of the MPL was not distributed with this file, You can obtain one at 
+# http://mozilla.org/MPL/2.0/.
+
