@@ -618,15 +618,24 @@ def addScoreInfo(score, row, metadata, idx):
     measures = parts[0].getElementsByClass(music21.stream.Measure)
     for i in range(len(row)):
         row[i] = objectValueMap(row[i])
+    if idx == 0:
+        metadata.append('score')
+        metadata.append('parts')
+    row.append(score.corpusFilepath)
+    instruments = []
     for i in range(len(parts)):
-        if i == 0:
-            metadata.append('p%d' % (i+1))
         instrument = parts[i].getElementsByClass(music21.instrument.Instrument)[0]
-        row.append(instrument.partName)
+        instruments.append(instrument.partName)
+    row.append(','.join(instruments))
+    if idx == 0:
+        metadata.append('measures')
+    mms = []
     for i in range(len(measures)):
-        if i == 0:
-            metadata.append('m%d' % (i+1))
-        row.append(measures[i].number)
+        mms.append(measures[i].number)
+    measureTxt = '%d' % mms[0]
+    if len(mms) > 1:
+        measureTxt = '%d-%d' % (min(mms), max(mms))
+    row.append(measureTxt)
 
 def objectValueMap(obj):
     data = music21.musicNet._getPy2neoMetadata(obj)['data']

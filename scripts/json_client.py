@@ -55,12 +55,6 @@ if 'error' in response:
     sys.exit(1)
 token = response['token']
 
-response = urllib2.urlopen('http://localhost:8080/getresults?token=%s&row=%d' % (token, 0))
-response = urllib2.urlopen('http://localhost:8080/getimages?token=%s&block=true' % token)
-print response
-sys.exit()
-
-
 doneList = []
 if not makePreviews:
     doneList.append('images')

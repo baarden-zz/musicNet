@@ -1318,6 +1318,7 @@ class Query(object):
                 relations.append(itemTuple)
         score = stream.Score()
         scoreNodeId = [x for x in nodes if nodes[x][1]['type'] == 'Score'][0]
+        self._addMusic21Properties(score, nodes[scoreNodeId][1])
         self._addHierarchicalMusic21Data(score, scoreNodeId, nodes, relations)
         return score
 
