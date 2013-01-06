@@ -577,14 +577,14 @@
 <span class="nd">@app.get</span><span class="p">(</span><span class="s">&#39;/getimages&#39;</span><span class="p">)</span>
 <div class="viewcode-block" id="getImage"><a class="viewcode-back" href="../../../musicNetServer.html#music21.musicNet.musicNetServer.getImage">[docs]</a><span class="k">def</span> <span class="nf">getImage</span><span class="p">():</span>
     <span class="sd">&#39;&#39;&#39;</span>
-<span class="sd">    Server address:</span>
+<span class="sd">    Server address::</span>
 <span class="sd"> </span>
 <span class="sd">        /getimages?token=nnn&amp;block=false</span>
-<span class="sd">    </span>
-<span class="sd">    Request parameters:</span>
+
+<span class="sd">    Request parameters::</span>
 
 <span class="sd">        token - The number returned by the submitquery service</span>
-<span class="sd">        </span>
+<span class="sd">        block - [optional] if true, the query will block for a response</span>
 <span class="sd">    </span>
 <span class="sd">    Response: </span>
 <span class="sd">    </span>
@@ -600,7 +600,7 @@
 <span class="sd">        2-4 times a second is probably not useful.</span>
 <span class="sd">        Previews are generated after a call to the result service.</span>
 <span class="sd">    </span>
-<span class="sd">    Data structure:</span>
+<span class="sd">    Data structure::</span>
 <span class="sd">    </span>
 <span class="sd">        {&#39;url&#39;: &#39;/images/previewJHUqde.png&#39;, &#39;index&#39;: 0, &#39;type&#39;: &#39;preview&#39;}</span>
 <span class="sd">        {&#39;url&#39;: &#39;/images/previewriWX1Z.png&#39;, &#39;index&#39;: 1, &#39;type&#39;: &#39;preview&#39;}</span>
