@@ -216,8 +216,7 @@ def _serverCall(func, *args):
         except py2neo.rest.SocketError:
             time.sleep(0.2)
             continue
-        break
-    return r    
+        return r    
 
 
 #-------------------------------------------------------------------------------
@@ -269,9 +268,9 @@ class Database(object):
         0
         >>> print db.graph_db.get_node_count()
         1
-        >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')  #_DOCS_HIDE
-        >>> addMomentsToScore(bwv84_5)                  #_DOCS_HIDE
-        >>> db.addScore(bwv84_5)                        #_DOCS_HIDE
+        >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')  # doctest: hide
+        >>> addMomentsToScore(bwv84_5)                  # doctest: hide
+        >>> db.addScore(bwv84_5)                        # doctest: hide
 
         The node count can never go below 1 because Neo4j always keeps a reference node 
         in its network graph.
@@ -291,9 +290,7 @@ class Database(object):
 
     def addScore(self, score, verbose=False):
         '''Adds a music21 :class:`~music21.stream.Score` to the database.
-        In case the score does not contain :class:`~music21.metadata.Metadata` information
-        about the name of the score. To see progress on the import, we can set the 
-        `verbose` argument to `True`.
+        To see progress on the import, we can set the `verbose` argument to `True`.
         
         In order to be able to access vertical note relationships such as
         `NoteSimultaneousWithNote`, `NoteStartsAtMoment`, and `NoteSustainedAtMoment`,
@@ -301,7 +298,7 @@ class Database(object):
         module-level :meth:`addMomentsToScore` method before calling this method.
         
         >>> db = Database()
-        >>> db.wipeDatabase() #_DOCS_HIDE
+        >>> db.wipeDatabase() # doctest: hide
         >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')
         >>> addMomentsToScore(bwv84_5)
         >>> db.addScore(bwv84_5)

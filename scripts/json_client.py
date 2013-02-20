@@ -44,6 +44,7 @@ query = { 'nodes': nodes,
          }
 
 jsonQuery = json.dumps(query)
+print jsonQuery
 req = urllib2.Request('http://localhost:8080/submitquery', jsonQuery, {'Content-Type': 'application/json'})
 try:
     response = json.loads(urllib2.urlopen(req).readline())

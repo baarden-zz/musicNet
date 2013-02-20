@@ -90,6 +90,19 @@ class Silence:
 
 
 class GeneratePreviews(threading.Thread):
+    '''
+    .. doctest::
+       hide
+    >>> import Queue
+    >>> inQueue = Queue.Queue()
+    >>> outQueue = Queue.Queue()
+    >>> from music21.musicNet.musicNetServer import *
+    >>> previewGen = GeneratePreviews(inQueue, outQueue)
+    >>> from music21 import *
+    >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')
+    >>> previewGen.makePreview(bwv84_5)
+    'preview...png'
+    '''
     
     def __init__(self, inQueue, outQueue):
         threading.Thread.__init__(self)
@@ -120,8 +133,11 @@ class GeneratePreviews(threading.Thread):
         header = [x for x in conv.context.contents if isinstance(x, music21.lily.lilyObjects.LyLilypondHeader)][0]
         header.lilypondHeaderBody = 'tagline = ""'
         with Silence():
-            conv.createPNG(filename)
-        return os.path.basename(filename + '.png')
+            conv.runThroughLily(backend='eps -dresolution=200', format='png', fileName=filename)
+        from subprocess import call
+        filename += '.png'
+        call(['convert', '-trim', filename, filename])
+        return os.path.basename(filename)
 
 #-------------------------------------------------------------------------------
 # musicNetServer
@@ -165,7 +181,7 @@ def listScores():
         { movementName: name_of_score_file, _names: [ contributor, ... ], index: original_path_of_score_file }
         ...
     
-    We can test the functioning of the app without actually starting it by using the :class:`webtest`
+    We can test the functionallity of the app without actually starting it by using the :class:`webtest`
     framework:
     
     >>> from webtest import TestApp
@@ -318,7 +334,7 @@ def listRelationshipProperties():
     for row in rows:
         yield json.dumps(row) + '\n'
 
-@app.get('/images/<filename:re:.*\.png>#')
+@app.get('/images/<filename:re:.*\.png>')
 def sendImage(filename):
     tempdir = tempfile.gettempdir()
     return bottle.static_file(filename, root=tempdir, mimetype='image/png')
@@ -334,7 +350,8 @@ def prepareQuery():
     to obtain results using 'getresults' and 'getimages'. Unlike
     the other services, it uses the POST method and expects the body of the request
     to be a JSON document containing the query. Tokens are good for a
-    half hour before they expire.
+    half hour before they expire. Identical queries from the same IP address will
+    return the same token.
     
     The JSON query is expected to be an object with specific key/value pairs:
     
@@ -446,6 +463,7 @@ def prepareQuery():
     token = hash(ipAddr + pattern)
     app.tokens[token] = [pattern, previews, time.time()]
     expireTokens()
+    print "token: %s" % token
     return { 'token': token }
     
 @app.get('/getresults')
@@ -532,7 +550,6 @@ def getImage():
     Request parameters::
 
         token - The number returned by the submitquery service
-        block - [optional] if true, the query will block for a response
     
     Response: 
     
@@ -565,7 +582,7 @@ def getImage():
     >>> import json
     >>> token = json.loads(r.body)['token']
     >>> r = webapp.get('/getresults?token=%s&start=0&limit=1' % token)
-    >>> r = webapp.get('/getimages?token=%s&block=true' % token)                # doctest: +SKIP
+    >>> r = webapp.get('/getimages?token=%s' % token)                           # doctest: +SKIP
     >>> sorted(json.loads(r.body).items())                                      # doctest: +SKIP
     [(u'index', 0), (u'type', u'preview'), (u'url', u'/images/preview...png')]  # doctest: +SKIP
     '''
