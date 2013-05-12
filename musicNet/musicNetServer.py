@@ -266,6 +266,41 @@ def listNodeProperties():
     for row in rows:
         yield json.dumps(row) + '\n'
 
+@app.get('/listnodepropertyvalues')
+def listNodePropertyValues():
+    '''
+    Server address::
+ 
+        /listnodepropertyvalues
+    
+    Request parameters: none.
+    
+    Response: 
+    
+        A JSON array for each node property type in the database. The first element is the node
+        type, the second element is the name of the property, and the third is a list of values for that
+        property found in the database.
+        
+    Data structure::
+    
+        ['Instrument', 'partName', ['Alto', 'Bass', 'Soprano', 'Tenor']]
+        ['Note', '_stemDirection', ['down', 'up']]
+        ...
+    
+    Example:
+
+    >>> from webtest import TestApp
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = TestApp(mns.app)
+    >>> r = webapp.get('/listpropertyvalues')
+    >>> import json
+    >>> json.loads(r.body.splitlines()[0])
+    [u'StaffGroup', u'offset', [0.0,]]
+    '''
+    rows = app.db.listNodePropertyValues()
+    for row in rows:
+        yield json.dumps(row) + '\n'
+        
 @app.get('/listrelationshiptypes')
 def listRelationshipTypes():
     '''

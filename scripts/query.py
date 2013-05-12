@@ -5,7 +5,8 @@ from music21.musicNet import *
 
 print 'Starting up...'
 db = Database()
-print db.listNodeProperties()
+values = db.listPropertyValues()
+print [x for x in values if x[0]=='Instrument' and x[1]=='partName']
 sys.exit()
 
 query = Query(db)

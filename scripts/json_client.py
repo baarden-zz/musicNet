@@ -44,8 +44,12 @@ query = { 'nodes': nodes,
          }
 
 jsonQuery = json.dumps(query)
-print jsonQuery
-req = urllib2.Request('http://localhost:8080/submitquery', jsonQuery, {'Content-Type': 'application/json'})
+#req = urllib2.Request('http://localhost:8080/submitquery', jsonQuery, {'Content-Type': 'application/json'})
+response = urllib2.urlopen('http://localhost:8080/listrelationshiptypes')
+for line in response.readlines():
+    print json.loads(line);
+sys.exit(1)    
+
 try:
     response = json.loads(urllib2.urlopen(req).readline())
 except urllib2.URLError:
@@ -54,6 +58,8 @@ except urllib2.URLError:
 if 'error' in response:
     print response['error']
     sys.exit(1)
+print response
+
 token = response['token']
 
 doneList = []

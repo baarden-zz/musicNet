@@ -390,21 +390,45 @@ class Database(object):
         if not hasattr(self, 'nTypes'):
             self.listNodeTypes()
         self.nodeProperties = []
+        self.propertyValues = []
         q = Query(self)
         for nodeType in self.nTypes:
             q.setStartNode(nodeType=nodeType)
-            results, meta = q.results(limit=50)
+            results, meta = q.results(limit=10000)
             results = [x[0] for x in results]
             nodes = _serverCall(self.graph_db.get_properties, *results)
-            properties = set()
+            properties = {}
             for node in nodes:
                 for prop in node:
                     if prop == 'type':
                         continue
-                    properties.add(prop)
+                    try:
+                        propSet = properties[prop]
+                    except:
+                        propSet = properties[prop] = set()
+                    propSet.add(node[prop])
             for p in properties:
                 self.nodeProperties.append((nodeType, p))
+                values = list(properties[p])
+                values.sort()
+                self.propertyValues.append((nodeType, p, tuple(values)))
         return self.nodeProperties
+    
+    def listNodePropertyValues(self):
+        '''Returns a list of lists of values used by node properties in the database
+        (node type, property name, (value1, value2, ...)).
+        
+        For instance, to see what part names are used by instruments in the database:
+        
+        >>> db = Database()
+        >>> values = db.listPropertyValues()
+        >>> print [x for x in values if x[0]=='Instrument' and x[1]=='partName']
+        [(u'Instrument', u'partName', (u'Alto', u'Bass', u'Soprano', u'Tenor'))]
+        '''
+        if hasattr(self, 'propertyValues'):
+            return self.propertyValues
+        self.listNodeProperties()
+        return self.propertyValues                
     
     def listRelationshipTypes(self):
         '''Returns a list of relationship types in the database, represented as 
