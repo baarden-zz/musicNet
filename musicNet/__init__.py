@@ -209,6 +209,9 @@ def _convertFromString(val):
             except ValueError: pass
     return val
 
+def _id(item):
+    return item.__dict__['_id']
+
 def _serverCall(func, *args):
     while True:
         try:
@@ -219,6 +222,16 @@ def _serverCall(func, *args):
         break
     return r    
 
+def _fix535(results, metadata):
+    orderColumn = -1
+    for i in range(len(metadata)):
+        if (metadata[i].find('INTERNAL_SORT') > -1):
+            orderColumn = i
+            metadata.pop(i)
+            break
+    if (orderColumn > -1):
+        for i in range(len(results)):
+            results[i].pop(orderColumn)
 
 #-------------------------------------------------------------------------------
 class Database(object):
@@ -551,7 +564,7 @@ class Database(object):
         def labelVoiceNotes(db, voice):
             nodeLookup = db._extractState['nodeLookup']
             for noteObj in voice:
-                nodeLookup[noteObj]['voice'] = int(voice.id)
+                nodeLookup[noteObj]['voice'] = int(_id(voice))
                 nodeLookup[noteObj]['parent'] = nodeLookup[voice]['parent']
             return HIDEFROMDATABASE
         self.addPropertyCallback('Voice', labelVoiceNotes)
@@ -772,7 +785,6 @@ class Database(object):
         '''
         state = self._extractState
         nodeLookup = state['nodeLookup']
-#        print obj.__class__.__name__
         if obj not in nodeLookup:
             nodeLookup[obj] = {}
         if parent and ('parent' not in nodeLookup[obj]):
@@ -1077,6 +1089,7 @@ class Query(object):
         results, metadata = _serverCall(cypher.execute, self.db.graph_db, pattern, 
                                         {'maxResults': limit, 'minRow': minRow})
         metadata = metadata.columns
+        _fix535(results, metadata) # Remove when issue 535 is fixed (introduced around Neo4j 1.8.1)
         return results, metadata
     
     def getResultProperties(self, result):
@@ -1276,18 +1289,6 @@ class Query(object):
         for p in props:
             self.returns.append(p)
 
-#    def printResults(self):
-#        '''Prints out the results of a query in tab-delimited format with the column names in
-#        the first row. If the :meth:`execute` method has not been called, it is called
-#        automatically.
-#        '''
-#        if self.results == None:
-#            self.execute()
-#        sys.stderr.write('%d results:\n' % len(self.results))
-#        print '\t'.join(self.metadata)
-#        for row in self.results:
-#            print '\t'.join([str(x) for x in row])
-
     def music21Score(self, resultList, metadata=None):
         '''
         Returns a music21 :class:`~music21.stream.Score` object, given a single
@@ -1311,13 +1312,13 @@ class Query(object):
         relations = []
         for itemTuple in result:
             if isinstance(itemTuple[0], py2neo.neo4j.Node):
-                if itemTuple[0].id not in nodes:
-                    nodes[itemTuple[0].id] = itemTuple
-#                    print itemTuple
+                if _id(itemTuple[0]) not in nodes:
+                    nodes[_id(itemTuple[0])] = itemTuple
             else:
                 relations.append(itemTuple)
         score = stream.Score()
         scoreNodeId = [x for x in nodes if nodes[x][1]['type'] == 'Score'][0]
+        self._addMusic21Properties(score, nodes[scoreNodeId][1])
         self._addHierarchicalMusic21Data(score, scoreNodeId, nodes, relations)
         return score
 
@@ -1431,7 +1432,7 @@ class Query(object):
         
         # PartInStaffGroup
         def addPartsToStaffGroup(self, partDict, part, staffGroup, r):
-            childId = r[0].start_node.id            
+            childId = _id(r[0].start_node)            
             part = self.nodeLookup.get(childId, None)
             if part:
                 staffGroup.addSpannedElements(part)
@@ -1444,8 +1445,8 @@ class Query(object):
             spanDict = r[1]
             spanType = spanDict.pop('name')
             span = classLookup[spanType]()
-            start = self.nodeLookup[r[0].start_node.id]
-            end = self.nodeLookup[r[0].end_node.id]
+            start = self.nodeLookup[_id(r[0].start_node)]
+            end = self.nodeLookup[_id(r[0].end_node)]
             span.addComponents(start, end)
             self._addProperties(span, spanDict)
             measure = start.getContextByClass('Measure')
@@ -1536,7 +1537,7 @@ class Query(object):
             node = results[i]
             if _getPy2neoMetadata(node)['data']['type'] != 'Note': continue
             node.queryName = metadata[i]
-            n.id = node.id
+            n.id = _id(node)
             q.setStartNode(n)
             subresults, meta = q.results()
             self._filterNodesAndRelationships(subresults[0], nodes, relations)
@@ -1567,16 +1568,16 @@ class Query(object):
         '''
         for item in results:
             if isinstance(item, py2neo.neo4j.Node):
-                if item.id not in nodes:
-                    nodes[item.id] = item
+                if item._id not in nodes:
+                    nodes[item._id] = item
             else:
-                relations[item.id] = item
+                relations[item._id] = item
     
     def _addChildren(self, node, rType, nodes, relations):
         ''' Add all the children of this node that are connected by the specified Relationship type.
         '''
         q = Query(self.db)
-        n = Node(q, nodeId=node.id)
+        n = Node(q, nodeId=node._id)
         q.setStartNode(n)
         q.addRelationship(relationType=rType, end=n)
         subresults, meta = q.results(limit=500)
@@ -1585,14 +1586,14 @@ class Query(object):
                     
     def _addHierarchicalMusic21Data(self, parent, parentId, nodes, relates):
         # Some bits of the music21-to-MusicXML conversion process are sensitive to order.
-        relatesToNode = sorted([x for x in relates if x[0].end_node.id == parentId],
-                               key = lambda r: r[0].id)
+        relatesToNode = sorted([x for x in relates if _id(x[0].end_node) == parentId],
+                               key = lambda r: _id(r[0]))
         for r in relatesToNode:
             rType = r[0]['type']
             parentType = parent.__class__.__name__
             if not (rType.endswith('In' + parentType) or rType in ('spannerTo')):
                 continue
-            childId = r[0].start_node.id
+            childId = _id(r[0].start_node)
             childDict = nodes[childId][1]
             child = self._addMusic21Child(childDict, parent, r)
             if child == None:

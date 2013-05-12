@@ -119,8 +119,8 @@ class GeneratePreviews(threading.Thread):
         conv.loadFromMusic21Object(score)
         header = [x for x in conv.context.contents if isinstance(x, music21.lily.lilyObjects.LyLilypondHeader)][0]
         header.lilypondHeaderBody = 'tagline = ""'
-        with Silence():
-            conv.createPNG(filename)
+        #with Silence():
+        conv.createPNG(filename)
         return os.path.basename(filename + '.png')
 
 #-------------------------------------------------------------------------------
@@ -442,6 +442,7 @@ def prepareQuery():
     if previews and q.returns:
         return { 'error': '"makePreviews" and "results" cannot be combined in the same query' }
     pattern = q._assemblePattern()
+    print pattern
     ipAddr = bottle.request.remote_addr or "None"
     token = hash(ipAddr + pattern)
     app.tokens[token] = [pattern, previews, time.time()]
@@ -519,6 +520,7 @@ def results():
             item = { 'type': 'metadata', 'data': metadata }
             yield json.dumps(item) + '\n'
         item = { 'type': 'data', 'index': queryIdx, 'data': row }
+        print item
         yield json.dumps(item) + '\n'
     expireTokens()
 
@@ -618,6 +620,8 @@ def addScoreInfo(score, row, metadata, idx):
     measures = parts[0].getElementsByClass(music21.stream.Measure)
     for i in range(len(row)):
         row[i] = objectValueMap(row[i])
+    metadata.append('score')
+    row.append(score.corpusFilepath)
     for i in range(len(parts)):
         if i == 0:
             metadata.append('p%d' % (i+1))
@@ -629,7 +633,9 @@ def addScoreInfo(score, row, metadata, idx):
         row.append(measures[i].number)
 
 def objectValueMap(obj):
+    print obj
     data = music21.musicNet._getPy2neoMetadata(obj)['data']
+    print data
     kind = data['type']
     if kind == 'Note':
         return data['pitch']
@@ -648,7 +654,7 @@ def expireTokens():
 
 
 if __name__ == "__main__":
-    bottle.run(app, host='localhost', port=8080, reloader=True)
+    bottle.run(app, host='10.0.1.99', port=8080, reloader=True)
     
 
 #    _prepDoctests()

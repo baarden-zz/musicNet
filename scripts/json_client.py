@@ -43,8 +43,9 @@ query = { 'nodes': nodes,
           'makePreviews': makePreviews
          }
 
+host = 'http://76.19.115.205:8080'
 jsonQuery = json.dumps(query)
-req = urllib2.Request('http://localhost:8080/submitquery', jsonQuery, {'Content-Type': 'application/json'})
+req = urllib2.Request(host + '/submitquery', jsonQuery, {'Content-Type': 'application/json'})
 try:
     response = json.loads(urllib2.urlopen(req).readline())
 except urllib2.URLError:
@@ -55,11 +56,8 @@ if 'error' in response:
     sys.exit(1)
 token = response['token']
 
-response = urllib2.urlopen('http://localhost:8080/getresults?token=%s&row=%d' % (token, 0))
-response = urllib2.urlopen('http://localhost:8080/getimages?token=%s&block=true' % token)
-print response
-sys.exit()
-
+response = urllib2.urlopen(host + '/getresults?token=%s&row=%d' % (token, 0))
+response = urllib2.urlopen(host + '/getimages?token=%s&block=true' % token)
 
 doneList = []
 if not makePreviews:
@@ -69,7 +67,7 @@ imagerow = 0
 metadata = None
 while 'data' not in doneList or (makePreviews and 'images' not in doneList):
     if 'data' not in doneList:
-        response = urllib2.urlopen('http://localhost:8080/getresults?token=%s&row=%d' % (token, row))
+        response = urllib2.urlopen(host + '/getresults?token=%s&row=%d' % (token, row))
         lines = response.readlines()
         if (len(lines) == 0):
             doneList.append('data')
@@ -83,7 +81,7 @@ while 'data' not in doneList or (makePreviews and 'images' not in doneList):
             print data
             row += 1
     if 'images' not in doneList:
-        response = urllib2.urlopen('http://localhost:8080/getimages?token=%s' % token)
+        response = urllib2.urlopen(host + '/getimages?token=%s' % token)
         for line in response:
             data = json.loads(line)
             if 'error' in data:
