@@ -292,7 +292,7 @@ def listNodePropertyValues():
     >>> from webtest import TestApp
     >>> import music21.musicNet.musicNetServer as mns
     >>> webapp = TestApp(mns.app)
-    >>> r = webapp.get('/listpropertyvalues')
+    >>> r = webapp.get('/listnodepropertyvalues')
     >>> import json
     >>> json.loads(r.body.splitlines()[0])
     [u'StaffGroup', u'offset', [0.0,]]
@@ -369,6 +369,41 @@ def listRelationshipProperties():
     for row in rows:
         yield json.dumps(row) + '\n'
 
+@app.get('/listrelationshippropertyvalues')
+def listRelationshipPropertyValues():
+    '''
+    Server address::
+ 
+        /listrelationshippropertyvalues
+    
+    Request parameters: none.
+    
+    Response: 
+    
+        A JSON array for each relationship property type in the database. The first element is the relationship
+        type, the second element is the name of the property, and the third is a list of values for that
+        property found in the database.
+        
+    Data structure::
+    
+        ['NoteToNoteByBeat', 'interval', [-12, -7, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 12]]
+        ['NoteToNote', 'interval', [-12, -7, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 12]]
+        ...
+    
+    Example:
+
+    >>> from webtest import TestApp
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = TestApp(mns.app)
+    >>> r = webapp.get('/listrelationshippropertyvalues')
+    >>> import json
+    >>> json.loads(r.body.splitlines()[0])
+    [u'NoteToNoteByBeat', u'interval', [-12, -7, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 12]]
+    '''
+    rows = app.db.listRelationshipPropertyValues()
+    for row in rows:
+        yield json.dumps(row) + '\n'
+        
 @app.get('/images/<filename:re:.*\.png>')
 def sendImage(filename):
     tempdir = tempfile.gettempdir()

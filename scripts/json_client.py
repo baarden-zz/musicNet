@@ -45,7 +45,7 @@ query = { 'nodes': nodes,
 
 jsonQuery = json.dumps(query)
 #req = urllib2.Request('http://localhost:8080/submitquery', jsonQuery, {'Content-Type': 'application/json'})
-response = urllib2.urlopen('http://localhost:8080/listrelationshiptypes')
+response = urllib2.urlopen('http://localhost:8080/listrelationshippropertyvalues')
 for line in response.readlines():
     print json.loads(line);
 sys.exit(1)    

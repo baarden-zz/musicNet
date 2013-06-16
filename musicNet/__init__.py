@@ -390,7 +390,7 @@ class Database(object):
         if not hasattr(self, 'nTypes'):
             self.listNodeTypes()
         self.nodeProperties = []
-        self.propertyValues = []
+        self.nodePropertyValues = []
         q = Query(self)
         for nodeType in self.nTypes:
             q.setStartNode(nodeType=nodeType)
@@ -411,7 +411,7 @@ class Database(object):
                 self.nodeProperties.append((nodeType, p))
                 values = list(properties[p])
                 values.sort()
-                self.propertyValues.append((nodeType, p, tuple(values)))
+                self.nodePropertyValues.append((nodeType, p, tuple(values)))
         return self.nodeProperties
     
     def listNodePropertyValues(self):
@@ -421,14 +421,14 @@ class Database(object):
         For instance, to see what part names are used by instruments in the database:
         
         >>> db = Database()
-        >>> values = db.listPropertyValues()
+        >>> values = db.listNodePropertyValues()
         >>> print [x for x in values if x[0]=='Instrument' and x[1]=='partName']
         [(u'Instrument', u'partName', (u'Alto', u'Bass', u'Soprano', u'Tenor'))]
         '''
-        if hasattr(self, 'propertyValues'):
-            return self.propertyValues
+        if hasattr(self, 'nodePropertyValues'):
+            return self.nodePropertyValues
         self.listNodeProperties()
-        return self.propertyValues                
+        return self.nodePropertyValues                
     
     def listRelationshipTypes(self):
         '''Returns a list of relationship types in the database, represented as 
@@ -484,21 +484,46 @@ class Database(object):
         for x in self.listRelationshipTypes():
             rTypes.add(x['type']) 
         self.relateProperties = []
+        self.relatePropertyValues = []
         for rType in rTypes:
             q = Query(self)
             q.setStartRelationship(relationType=rType)
-            results, meta = q.results(limit=50)
+            results, meta = q.results(limit=10000)
             results = [x[0] for x in results]
             nodes = _serverCall(self.graph_db.get_properties, *results)
-            properties = set()
-            for relate in results:
+            properties = {}
+            for relate in nodes:
                 for prop in relate:
-                    if prop == 'type': continue
-                    properties.add(prop)
+                    if prop == 'type':
+                        continue
+                    try:
+                        propSet = properties[prop]
+                    except:
+                        propSet = properties[prop] = set()
+                    propSet.add(relate[prop])
             for p in properties:
-                self.relateProperties.append( (rType, p) )
+                self.relateProperties.append((rType, p))
+                values = list(properties[p])
+                values.sort()
+                self.relatePropertyValues.append((rType, p, tuple(values)))
         return self.relateProperties
 
+    def listRelationshipPropertyValues(self):
+        '''Returns a list of lists of values used by relationship properties in the database
+        (relationship type, property name, (value1, value2, ...)).
+        
+        For instance, to see what melodic intervals are used in the database:
+        
+        >>> db = Database()
+        >>> values = db.listRelationshipPropertyValues()
+        >>> print [x for x in values if x[0]=='NoteToNote' and x[1]=='interval']
+        [(u'NoteToNote', u'interval', (-12, -7, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 12))]
+        '''
+        if hasattr(self, 'relatePropertyValues'):
+            return self.relatePropertyValues
+        self.listRelationshipProperties()
+        return self.relatePropertyValues                
+    
     def addPropertyCallback(self, entity, callback):
         '''**For advanced use only.**
         

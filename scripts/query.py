@@ -5,7 +5,7 @@ from music21.musicNet import *
 
 print 'Starting up...'
 db = Database()
-values = db.listPropertyValues()
+values = db.listRelationshipProperties()
 print [x for x in values if x[0]=='Instrument' and x[1]=='partName']
 sys.exit()
 
