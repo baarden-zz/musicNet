@@ -135,8 +135,8 @@ class GeneratePreviews(threading.Thread):
         conv.loadFromMusic21Object(score)
         header = [x for x in conv.context.contents if isinstance(x, music21.lily.lilyObjects.LyLilypondHeader)][0]
         header.lilypondHeaderBody = 'tagline = ""'
-#        with Silence():
-        conv.runThroughLily(backend='eps -dresolution=200', format='png', fileName=filename)
+        with Silence():
+            conv.runThroughLily(backend='eps -dresolution=200', format='png', fileName=filename)
         from subprocess import call
         filename += '.png'
         call(['convert', '-trim', filename, filename])
@@ -569,6 +569,7 @@ def prepareQuery():
     if previews and q.returns:
         return { 'error': '"makePreviews" and "results" cannot be combined in the same query' }
     pattern = q._assemblePattern()
+    print pattern
     ipAddr = bottle.request.remote_addr or "None"
     token = hash(ipAddr + pattern)
     app.tokens[token] = [pattern, columns, previews, time.time()]
@@ -771,6 +772,12 @@ def addScoreInfo(results, row, metadata, idx):
     if idx == 0:
         metadata.extend(['score', 'parts', 'measures'])
     instruments = []
+    for i in range(len(parts)):
+        instrument = parts[i].getElementsByClass(music21.instrument.Instrument)[0]
+        instruments.append(instrument.partName)
+    row.append(','.join(instruments))
+    if idx == 0:
+        metadata.append('measures')
     mms = []
     filepath = ''
     for el in results:
