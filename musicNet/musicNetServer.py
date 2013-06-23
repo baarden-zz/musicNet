@@ -569,7 +569,6 @@ def prepareQuery():
     if previews and q.returns:
         return { 'error': '"makePreviews" and "results" cannot be combined in the same query' }
     pattern = q._assemblePattern()
-    print pattern
     ipAddr = bottle.request.remote_addr or "None"
     token = hash(ipAddr + pattern)
     app.tokens[token] = [pattern, columns, previews, time.time()]
@@ -772,12 +771,6 @@ def addScoreInfo(results, row, metadata, idx):
     if idx == 0:
         metadata.extend(['score', 'parts', 'measures'])
     instruments = []
-    for i in range(len(parts)):
-        instrument = parts[i].getElementsByClass(music21.instrument.Instrument)[0]
-        instruments.append(instrument.partName)
-    row.append(','.join(instruments))
-    if idx == 0:
-        metadata.append('measures')
     mms = []
     filepath = ''
     for el in results:
