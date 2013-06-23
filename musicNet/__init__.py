@@ -105,7 +105,7 @@ def addMomentsToScore(score, forceAdd=False):
     '''Adds :class:`Moment` objects to a :class:`~music21.stream.Score`.
     Without them, the :meth:`Database.addScore` method will not 
     be able to add vertical note relationships to the database, such as
-    `NoteSimultaneousWithNote`, `NoteStartsAtMoment`, and `NoteSustainedAtMoment`.
+    `NoteSimultaneousWithNote` and `MomentInNote`.
     
     >>> from music21 import *
     >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')
@@ -307,7 +307,7 @@ class Database(object):
         To see progress on the import, we can set the `verbose` argument to `True`.
         
         In order to be able to access vertical note relationships such as
-        `NoteSimultaneousWithNote`, `NoteStartsAtMoment`, and `NoteSustainedAtMoment`,
+        `NoteSimultaneousWithNote` and `MomentInNote`,
         we need to add :class:`Moment` objects to the score using the 
         module-level :meth:`addMomentsToScore` method before calling this method.
         
@@ -572,7 +572,7 @@ class Database(object):
                     break
             vertex = nodeLookup[part]['vertex']
             vertex['number'] = i
-            db._extractState['history'] = { 'NoteToNote': {}, 'NoteToNoteByBeat': {} }
+            db._extractState['history'] = { 'NoteToNote': {} }
             for key in ('clef', 'timeSignature', 'keySignatureSharps', 'keySignatureMode'):
                 db._extractState[key] = None
         self.addPropertyCallback('Part', addPartNumber)
@@ -615,14 +615,14 @@ class Database(object):
 
         # Note
         def addNoteVoiceleading(db, noteObj):
-            def addVoiceleading(db, relationship, noteObj, offset):
+            def addVoiceleading(db, byBeat, noteObj, offset):
                 if noteObj.isRest:
                     return
                 history = db._extractState['history']
                 nodeLookup = db._extractState['nodeLookup']
                 voice = nodeLookup[noteObj]['voice']
                 try:
-                    prevNote, prevOffset = history[relationship][voice]
+                    prevNote, prevOffset = history['NoteToNote'][voice]
                     voiceleadingHistory = True
                 except KeyError:
                     voiceleadingHistory = False
@@ -630,16 +630,16 @@ class Database(object):
                 if (voiceleadingHistory and 
                         offset - prevOffset <= nodeLookup[noteObj]['parent'].barDuration):
                     mint = noteObj.midi - prevNote.midi
-                    db._addEdge(prevNote, relationship, noteObj, { 'interval': mint } )
-                history[relationship][voice] = [noteObj, offset]
+                    db._addEdge(prevNote, 'NoteToNote', noteObj, { 'interval': mint, 'byBeat': byBeat } )
+                history['NoteToNote'][voice] = [noteObj, offset]
             
             nodeLookup = db._extractState['nodeLookup']
             offset = nodeLookup[noteObj]['parent'].offset + noteObj.offset
             if 'voice' not in nodeLookup[noteObj]:
                 nodeLookup[noteObj]['voice'] = 1
-            addVoiceleading(db, 'NoteToNote', noteObj, offset)
+            addVoiceleading(db, False, noteObj, offset)
             if noteObj.offset % 1 == 0:
-                addVoiceleading(db, 'NoteToNoteByBeat', noteObj, offset)
+                addVoiceleading(db, True, noteObj, offset)
         self.addPropertyCallback('Note', addNoteVoiceleading)
 
         # Pitch
@@ -718,10 +718,10 @@ class Database(object):
         def addCrossPartRelationships(db, moment):
             simultaneous = list(moment.simultaneous)
             for noteObj in simultaneous:
-                db._addEdge(noteObj, 'NoteSustainedAtMoment', moment)
+                db._addEdge(noteObj, 'MomentInNote', moment, { 'startMoment': False })
             sameOffset = list(moment.sameOffset)
             for noteObj in sameOffset:
-                db._addEdge(noteObj, 'NoteStartsAtMoment', moment)
+                db._addEdge(noteObj, 'MomentInNote', moment, { 'startMoment': True })
             notes = sameOffset + simultaneous
             simuls = {}
             for i in range(len(notes) - 1):
@@ -1875,7 +1875,7 @@ class Moment(base.Music21Object):
     When a Score with Moments is added to a :class:`Database` object, it will
     add vertical relationships between Notes (`NoteSimultaneousWithNote`). It
     will also add Moment nodes to the database, along with their corresponding
-    Note relationships (`NoteStartsAtMoment` and `NoteSustainedAtMoment`).
+    Note relationships (`MomentInNote`).
     
     Typically Moments are added to a score via the :meth:`musicNet.addMomentsToScore` 
     class method. 
