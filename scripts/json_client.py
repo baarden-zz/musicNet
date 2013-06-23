@@ -45,7 +45,12 @@ query = { 'nodes': nodes,
 
 host = 'http://76.19.115.205:8080'
 jsonQuery = json.dumps(query)
-req = urllib2.Request(host + '/submitquery', jsonQuery, {'Content-Type': 'application/json'})
+#req = urllib2.Request('http://localhost:8080/submitquery', jsonQuery, {'Content-Type': 'application/json'})
+response = urllib2.urlopen('http://localhost:8080/listrelationshippropertyvalues')
+for line in response.readlines():
+    print json.loads(line);
+sys.exit(1)    
+
 try:
     response = json.loads(urllib2.urlopen(req).readline())
 except urllib2.URLError:
@@ -54,10 +59,9 @@ except urllib2.URLError:
 if 'error' in response:
     print response['error']
     sys.exit(1)
-token = response['token']
+print response
 
-response = urllib2.urlopen(host + '/getresults?token=%s&row=%d' % (token, 0))
-response = urllib2.urlopen(host + '/getimages?token=%s&block=true' % token)
+token = response['token']
 
 doneList = []
 if not makePreviews:

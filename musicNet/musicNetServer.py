@@ -43,6 +43,7 @@ import threading
 import bottle
 import music21
 import music21.musicNet
+import py2neo
 
 
 ## {{{ http://code.activestate.com/recipes/577564/ (r2) 
@@ -90,6 +91,19 @@ class Silence:
 
 
 class GeneratePreviews(threading.Thread):
+    '''
+    .. doctest::
+       hide
+    >>> import Queue
+    >>> inQueue = Queue.Queue()
+    >>> outQueue = Queue.Queue()
+    >>> from music21.musicNet.musicNetServer import *
+    >>> previewGen = GeneratePreviews(inQueue, outQueue)
+    >>> from music21 import *
+    >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')
+    >>> previewGen.makePreview(bwv84_5)
+    'preview...png'
+    '''
     
     def __init__(self, inQueue, outQueue):
         threading.Thread.__init__(self)
@@ -104,7 +118,9 @@ class GeneratePreviews(threading.Thread):
             except Queue.Empty:
                 time.sleep(0.25)
                 continue
-            path = self.makePreview(scoreDict['score'])
+            q = music21.musicNet.Query(app.db)
+            score = q.music21Score(scoreDict['result'], scoreDict['metadata'])
+            path = self.makePreview(score)
             imageDict = { 'index': scoreDict['index'], 'path': path, 'token': scoreDict['token'] }
             self.inQueue.task_done()
             self.outQueue.put(imageDict)
@@ -119,9 +135,12 @@ class GeneratePreviews(threading.Thread):
         conv.loadFromMusic21Object(score)
         header = [x for x in conv.context.contents if isinstance(x, music21.lily.lilyObjects.LyLilypondHeader)][0]
         header.lilypondHeaderBody = 'tagline = ""'
-        #with Silence():
-        conv.createPNG(filename)
-        return os.path.basename(filename + '.png')
+#        with Silence():
+        conv.runThroughLily(backend='eps -dresolution=200', format='png', fileName=filename)
+        from subprocess import call
+        filename += '.png'
+        call(['convert', '-trim', filename, filename])
+        return os.path.basename(filename)
 
 #-------------------------------------------------------------------------------
 # musicNetServer
@@ -165,7 +184,7 @@ def listScores():
         { movementName: name_of_score_file, _names: [ contributor, ... ], index: original_path_of_score_file }
         ...
     
-    We can test the functioning of the app without actually starting it by using the :class:`webtest`
+    We can test the functionallity of the app without actually starting it by using the :class:`webtest`
     framework:
     
     >>> from webtest import TestApp
@@ -250,6 +269,41 @@ def listNodeProperties():
     for row in rows:
         yield json.dumps(row) + '\n'
 
+@app.get('/listnodepropertyvalues')
+def listNodePropertyValues():
+    '''
+    Server address::
+ 
+        /listnodepropertyvalues
+    
+    Request parameters: none.
+    
+    Response: 
+    
+        A JSON array for each node property type in the database. The first element is the node
+        type, the second element is the name of the property, and the third is a list of values for that
+        property found in the database.
+        
+    Data structure::
+    
+        ['Instrument', 'partName', ['Alto', 'Bass', 'Soprano', 'Tenor']]
+        ['Note', '_stemDirection', ['down', 'up']]
+        ...
+    
+    Example:
+
+    >>> from webtest import TestApp
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = TestApp(mns.app)
+    >>> r = webapp.get('/listnodepropertyvalues')
+    >>> import json
+    >>> json.loads(r.body.splitlines()[0])
+    [u'StaffGroup', u'offset', [0.0,]]
+    '''
+    rows = app.db.listNodePropertyValues()
+    for row in rows:
+        yield json.dumps(row) + '\n'
+        
 @app.get('/listrelationshiptypes')
 def listRelationshipTypes():
     '''
@@ -318,7 +372,42 @@ def listRelationshipProperties():
     for row in rows:
         yield json.dumps(row) + '\n'
 
-@app.get('/images/<filename:re:.*\.png>#')
+@app.get('/listrelationshippropertyvalues')
+def listRelationshipPropertyValues():
+    '''
+    Server address::
+ 
+        /listrelationshippropertyvalues
+    
+    Request parameters: none.
+    
+    Response: 
+    
+        A JSON array for each relationship property type in the database. The first element is the relationship
+        type, the second element is the name of the property, and the third is a list of values for that
+        property found in the database.
+        
+    Data structure::
+    
+        ['NoteToNoteByBeat', 'interval', [-12, -7, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 12]]
+        ['NoteToNote', 'interval', [-12, -7, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 12]]
+        ...
+    
+    Example:
+
+    >>> from webtest import TestApp
+    >>> import music21.musicNet.musicNetServer as mns
+    >>> webapp = TestApp(mns.app)
+    >>> r = webapp.get('/listrelationshippropertyvalues')
+    >>> import json
+    >>> json.loads(r.body.splitlines()[0])
+    [u'NoteToNoteByBeat', u'interval', [-12, -7, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 12]]
+    '''
+    rows = app.db.listRelationshipPropertyValues()
+    for row in rows:
+        yield json.dumps(row) + '\n'
+        
+@app.get('/images/<filename:re:.*\.png>')
 def sendImage(filename):
     tempdir = tempfile.gettempdir()
     return bottle.static_file(filename, root=tempdir, mimetype='image/png')
@@ -334,7 +423,8 @@ def prepareQuery():
     to obtain results using 'getresults' and 'getimages'. Unlike
     the other services, it uses the POST method and expects the body of the request
     to be a JSON document containing the query. Tokens are good for a
-    half hour before they expire.
+    half hour before they expire. Identical queries from the same IP address will
+    return the same token.
     
     The JSON query is expected to be an object with specific key/value pairs:
     
@@ -406,11 +496,18 @@ def prepareQuery():
     nodes = {}
     relations = {}
     properties = {}
+    notes = []
+    measures = {}
+    parts = {}
+    instruments = {}
+    score = {}
     if not req.get('nodes', False):
         return { 'error': 'query has no nodes' }
     for n in req['nodes']:
         node = q.addNode(n['type'], n['name'])
         nodes[n['name']] = node
+        if (n['type'] == 'Note'):
+            notes.append(node)
     for r in req.get('relationships', []):
         start = nodes[r['start']]
         end = nodes[r['end']]
@@ -418,6 +515,14 @@ def prepareQuery():
         relation = q.addRelationship(relationType=r['type'], start=start, end=end, 
                                      name=r['name'], optional=optional)
         relations[r['name']] = relation
+        if (r['type'] == 'NoteInMeasure'):
+            measures[start] = end
+        elif (r['type'] == 'MeasureInPart'):
+            parts[start] = end
+        elif (r['type'] == 'InstrumentInPart'):
+            instruments[end] = start 
+        elif (r['type'] == 'PartInScore'):
+            score[start] = end
     if 'startNode' in req:
         q.setStartNode(nodes[req['startNode']])
     elif 'startRelationship' in req:
@@ -435,17 +540,38 @@ def prepareQuery():
     if 'comparisonFilters' in req:
         for f in req['comparisonFilters']:
             addComparisonFilter(q, f, properties)
+    columns = []
     if 'returns' in req:
         for r in req['returns']:
-            q.addReturns(properties[r['property']])
+            columns = q.addReturns(properties[r['property']])
+        if columns:
+            columns = [x.name for x in columns]
+    if not columns:
+        columns = nodes.keys() + relations.keys() + [str(x) for x in properties.values()]
+    for n in notes:
+        if n not in measures.keys():
+            m = q.addNode('Measure', 'measure_' + n.name)
+            r = q.addRelationship(relationType='NoteInMeasure', start=n, end=m, name=n.name+'In'+m.name, optional=True)
+            measures[n] = m
+    for m in measures.values():
+        if m not in parts.keys():
+            p = q.addNode('Part', 'part_' + m.name)
+            r = q.addRelationship(relationType='MeasureInPart', start=m, end=p, name=m.name+'In'+p.name, optional=True)
+            parts[m] = p
+    for p in parts.values():
+        if p not in instruments.keys():
+            i = q.addNode('Instrument', 'instrument_' + p.name)
+            r = q.addRelationship(relationType='InstrumentInPart', start=i, end=p, name=i.name+'In'+p.name, optional=True)
+        if p not in score.keys():
+            s = q.addNode('Score', 'score_' + p.name)
+            r = q.addRelationship(relationType='PartInScore', start=p, end=s, name=p.name+'In'+s.name, optional=True)
     previews = req.get('makePreviews', False)
     if previews and q.returns:
         return { 'error': '"makePreviews" and "results" cannot be combined in the same query' }
     pattern = q._assemblePattern()
-    print pattern
     ipAddr = bottle.request.remote_addr or "None"
     token = hash(ipAddr + pattern)
-    app.tokens[token] = [pattern, previews, time.time()]
+    app.tokens[token] = [pattern, columns, previews, time.time()]
     expireTokens()
     return { 'token': token }
     
@@ -502,25 +628,52 @@ def results():
         item = { 'error': 'That token is invalid or has expired.' }
         yield json.dumps(item) + '\n'
         raise StopIteration
-    pattern, previews, timestamp = app.tokens[token]
+    pattern, columns, previews, timestamp = app.tokens[token]
     q = music21.musicNet.Query(app.db)
     data, metadata = q.results(minRow, limit, pattern)
+    rLookup = {}
+    for i in range(len(metadata)):
+        rLookup[metadata[i]] = i
     for idx in range(len(data)):
-        row = data[idx]
         queryIdx = idx + minRow
+        # remove any None values from the output
+        row = data[idx]
+        objects = []
+        objects_meta = []
+        nonobjects = []
+        nonobjects_meta = []
+        for i in range(len(row)):
+            item = row[i]
+            if isinstance(item, py2neo.rest.Resource):
+                objects.append(item)
+                objects_meta.append(metadata[i])
+            elif not item is None:
+                nonobjects.append(item)
+                nonobjects_meta.append(metadata[i])
+        # get extended results and limit to requested values
+        result = q.getResultProperties(objects)
+        objects = [objectValueMap(x[1]) for x in result]
+        items = objects + nonobjects
+        headers = objects_meta + nonobjects_meta
+        output = []
+        meta_output = columns[:]
+        for r in meta_output:
+            output.append(items[headers.index(r)])
+        addScoreInfo(result, output, meta_output, idx)
         if previews:
-            score = q.music21Score(row, metadata)
-            inQueue.put({ 'index': queryIdx, 'score': score, 'token': token })
-            addScoreInfo(score, row, metadata, idx)
-        else:
-            for i in range(len(row)):
-                if not isinstance(row[i], (str, unicode, float, int)):
-                    row[i] = str(row[i])
-        if idx == 0:  # wait until after previews have added data to return metadata
-            item = { 'type': 'metadata', 'data': metadata }
+            output_objects = []
+            output_meta = []
+            for i in range(len(result)):
+                if objects_meta[i] in columns:
+                    output_objects.append(result[i][0])
+                    output_meta.append(objects_meta[i])
+            print output_meta
+            print output_objects
+            inQueue.put({ 'index': queryIdx, 'result': output_objects, 'metadata': output_meta, 'token': token })
+        if idx == 0:
+            item = { 'type': 'metadata', 'data': meta_output }
             yield json.dumps(item) + '\n'
-        item = { 'type': 'data', 'index': queryIdx, 'data': row }
-        print item
+        item = { 'type': 'data', 'index': queryIdx, 'data': output }
         yield json.dumps(item) + '\n'
     expireTokens()
 
@@ -534,7 +687,6 @@ def getImage():
     Request parameters::
 
         token - The number returned by the submitquery service
-        block - [optional] if true, the query will block for a response
     
     Response: 
     
@@ -567,7 +719,7 @@ def getImage():
     >>> import json
     >>> token = json.loads(r.body)['token']
     >>> r = webapp.get('/getresults?token=%s&start=0&limit=1' % token)
-    >>> r = webapp.get('/getimages?token=%s&block=true' % token)                # doctest: +SKIP
+    >>> r = webapp.get('/getimages?token=%s' % token)                           # doctest: +SKIP
     >>> sorted(json.loads(r.body).items())                                      # doctest: +SKIP
     [(u'index', 0), (u'type', u'preview'), (u'url', u'/images/preview...png')]  # doctest: +SKIP
     '''
@@ -615,27 +767,26 @@ def addComparisonFilter(query, comparison, properties):
         post = properties[post]
     query.addComparisonFilter(pre, comparison['operator'], post)
 
-def addScoreInfo(score, row, metadata, idx):
-    parts = score.getElementsByClass(music21.stream.Part)
-    measures = parts[0].getElementsByClass(music21.stream.Measure)
-    for i in range(len(row)):
-        row[i] = objectValueMap(row[i])
-    metadata.append('score')
-    row.append(score.corpusFilepath)
-    for i in range(len(parts)):
-        if i == 0:
-            metadata.append('p%d' % (i+1))
-        instrument = parts[i].getElementsByClass(music21.instrument.Instrument)[0]
-        row.append(instrument.partName)
-    for i in range(len(measures)):
-        if i == 0:
-            metadata.append('m%d' % (i+1))
-        row.append(measures[i].number)
+def addScoreInfo(results, row, metadata, idx):
+    if idx == 0:
+        metadata.extend(['score', 'parts', 'measures'])
+    instruments = []
+    mms = []
+    filepath = ''
+    for el in results:
+        kind = el[1]['type']
+        if (kind == 'Instrument'):
+            instruments.append(el[1]['partName'])
+        elif (kind == 'Measure'):
+            mms.append(el[1]['number'])
+        elif (kind == 'Score'):
+            filepath = el[1]['corpusFilepath']
+    measureTxt = '%d' % mms[0]
+    if len(mms) > 1:
+        measureTxt = '%d-%d' % (min(mms), max(mms))
+    row.extend([filepath, ','.join(instruments), measureTxt])
 
-def objectValueMap(obj):
-    print obj
-    data = music21.musicNet._getPy2neoMetadata(obj)['data']
-    print data
+def objectValueMap(data):
     kind = data['type']
     if kind == 'Note':
         return data['pitch']
@@ -656,10 +807,6 @@ def expireTokens():
 if __name__ == "__main__":
     bottle.run(app, host='10.0.1.99', port=8080, reloader=True)
     
-
-#    _prepDoctests()
-#    music21.mainTest(Test)
-
 # This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. 
 # If a copy of the MPL was not distributed with this file, You can obtain one at 
 # http://mozilla.org/MPL/2.0/.

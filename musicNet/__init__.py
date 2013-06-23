@@ -85,6 +85,7 @@ import random
 import weakref
 import unittest, doctest
 import py2neo.neo4j
+import py2neo.rest
 import music21
 from music21 import *
 
@@ -219,8 +220,7 @@ def _serverCall(func, *args):
         except py2neo.rest.SocketError:
             time.sleep(0.2)
             continue
-        break
-    return r    
+        return r    
 
 def _fix535(results, metadata):
     orderColumn = -1
@@ -282,9 +282,9 @@ class Database(object):
         0
         >>> print db.graph_db.get_node_count()
         1
-        >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')  #_DOCS_HIDE
-        >>> addMomentsToScore(bwv84_5)                  #_DOCS_HIDE
-        >>> db.addScore(bwv84_5)                        #_DOCS_HIDE
+        >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')  # doctest: hide
+        >>> addMomentsToScore(bwv84_5)                  # doctest: hide
+        >>> db.addScore(bwv84_5)                        # doctest: hide
 
         The node count can never go below 1 because Neo4j always keeps a reference node 
         in its network graph.
@@ -304,9 +304,7 @@ class Database(object):
 
     def addScore(self, score, verbose=False):
         '''Adds a music21 :class:`~music21.stream.Score` to the database.
-        In case the score does not contain :class:`~music21.metadata.Metadata` information
-        about the name of the score. To see progress on the import, we can set the 
-        `verbose` argument to `True`.
+        To see progress on the import, we can set the `verbose` argument to `True`.
         
         In order to be able to access vertical note relationships such as
         `NoteSimultaneousWithNote`, `NoteStartsAtMoment`, and `NoteSustainedAtMoment`,
@@ -314,7 +312,7 @@ class Database(object):
         module-level :meth:`addMomentsToScore` method before calling this method.
         
         >>> db = Database()
-        >>> db.wipeDatabase() #_DOCS_HIDE
+        >>> db.wipeDatabase() # doctest: hide
         >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')
         >>> addMomentsToScore(bwv84_5)
         >>> db.addScore(bwv84_5)
@@ -325,7 +323,6 @@ class Database(object):
         '''
         self.nodes = []
         self.edges = []
-#        self.nodeLookup = {}
         self._extractState = { 'verbose': verbose,
                               'nodeCnt': 0,
                               'relationCnt': 0,
@@ -407,21 +404,45 @@ class Database(object):
         if not hasattr(self, 'nTypes'):
             self.listNodeTypes()
         self.nodeProperties = []
+        self.nodePropertyValues = []
         q = Query(self)
         for nodeType in self.nTypes:
             q.setStartNode(nodeType=nodeType)
-            results, meta = q.results(limit=50)
+            results, meta = q.results(limit=10000)
             results = [x[0] for x in results]
             nodes = _serverCall(self.graph_db.get_properties, *results)
-            properties = set()
+            properties = {}
             for node in nodes:
                 for prop in node:
                     if prop == 'type':
                         continue
-                    properties.add(prop)
+                    try:
+                        propSet = properties[prop]
+                    except:
+                        propSet = properties[prop] = set()
+                    propSet.add(node[prop])
             for p in properties:
                 self.nodeProperties.append((nodeType, p))
+                values = list(properties[p])
+                values.sort()
+                self.nodePropertyValues.append((nodeType, p, tuple(values)))
         return self.nodeProperties
+    
+    def listNodePropertyValues(self):
+        '''Returns a list of lists of values used by node properties in the database
+        (node type, property name, (value1, value2, ...)).
+        
+        For instance, to see what part names are used by instruments in the database:
+        
+        >>> db = Database()
+        >>> values = db.listNodePropertyValues()
+        >>> print [x for x in values if x[0]=='Instrument' and x[1]=='partName']
+        [(u'Instrument', u'partName', (u'Alto', u'Bass', u'Soprano', u'Tenor'))]
+        '''
+        if hasattr(self, 'nodePropertyValues'):
+            return self.nodePropertyValues
+        self.listNodeProperties()
+        return self.nodePropertyValues                
     
     def listRelationshipTypes(self):
         '''Returns a list of relationship types in the database, represented as 
@@ -444,10 +465,8 @@ class Database(object):
         self.nTypes = set()
         rTypes = set()
         relateTypes = []
-        
         while not relateTypes:
             relateTypes = _serverCall(self.graph_db.get_relationship_types)
-            
         for relateType in relateTypes:
             q = Query(self)
             r = q.setStartRelationship(relationType=relateType)
@@ -479,21 +498,46 @@ class Database(object):
         for x in self.listRelationshipTypes():
             rTypes.add(x['type']) 
         self.relateProperties = []
+        self.relatePropertyValues = []
         for rType in rTypes:
             q = Query(self)
             q.setStartRelationship(relationType=rType)
-            results, meta = q.results(limit=50)
+            results, meta = q.results(limit=10000)
             results = [x[0] for x in results]
             nodes = _serverCall(self.graph_db.get_properties, *results)
-            properties = set()
-            for relate in results:
+            properties = {}
+            for relate in nodes:
                 for prop in relate:
-                    if prop == 'type': continue
-                    properties.add(prop)
+                    if prop == 'type':
+                        continue
+                    try:
+                        propSet = properties[prop]
+                    except:
+                        propSet = properties[prop] = set()
+                    propSet.add(relate[prop])
             for p in properties:
-                self.relateProperties.append( (rType, p) )
+                self.relateProperties.append((rType, p))
+                values = list(properties[p])
+                values.sort()
+                self.relatePropertyValues.append((rType, p, tuple(values)))
         return self.relateProperties
 
+    def listRelationshipPropertyValues(self):
+        '''Returns a list of lists of values used by relationship properties in the database
+        (relationship type, property name, (value1, value2, ...)).
+        
+        For instance, to see what melodic intervals are used in the database:
+        
+        >>> db = Database()
+        >>> values = db.listRelationshipPropertyValues()
+        >>> print [x for x in values if x[0]=='NoteToNote' and x[1]=='interval']
+        [(u'NoteToNote', u'interval', (-12, -7, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 12))]
+        '''
+        if hasattr(self, 'relatePropertyValues'):
+            return self.relatePropertyValues
+        self.listRelationshipProperties()
+        return self.relatePropertyValues                
+    
     def addPropertyCallback(self, entity, callback):
         '''**For advanced use only.**
         
@@ -704,7 +748,6 @@ class Database(object):
         # Spanner
         def addSpannerRelationship(db, span):
             kind = span.__class__.__name__
-#            if kind == 'Moment': return
             if len(span.getSpannedElements()) > 2:
                 if kind == 'StaffGroup':
                     for i in range(len(span)):
@@ -833,14 +876,7 @@ class Database(object):
         properties['type'] = relationship
         edge = [ start, relationship, end, properties ]
         self.edges.append(edge)
-    
-#    def _editNode(self, item, key, value):
-#        idx = self.nodeLookup[item]
-#        node = self.nodes[idx]
-#        if value == None:
-#            value = 'None'
-#        node().vertex[key] = value
-        
+           
     def _runCallbacks(self, node):
         keys = self._callbacks.keys()
         if hasattr(node, 'classes'):
@@ -907,9 +943,7 @@ class Database(object):
         idx = 0
         nodeLookup = self._extractState['nodeLookup']
         while idx < len(self.nodes):
-#        while self.nodes:
             subset = self.nodes[idx:idx+batchSize]
-#            del self.nodes[:batchSize]
             batchLen = len(subset)
             vertices = [nodeLookup[x()]['vertex'] for x in subset]
             results = _serverCall(self.graph_db.create, *vertices)
@@ -946,9 +980,7 @@ class Database(object):
             maxEdges = len(edgeRefs)
         idx = 0
         while idx < len(edgeRefs):
-#        while edgeRefs:
             subset = edgeRefs[idx:idx+batchSize]
-#            del edgeRefs[:batchSize]
             batchLen = len(subset)
             _serverCall(self.graph_db.create, *subset)
             self._extractState['relationCnt'] += batchLen
@@ -1306,19 +1338,22 @@ class Query(object):
         '''
         self.nodeLookup = {}
         result = resultList[:]
-        self._addHierarchicalNodes(result, metadata)
+        # add hierarchical nodes and result properties if that hasn't happened already
+        self._addHierarchicalNodes(result, metadata, True)
         result = self.getResultProperties(result)
         nodes = {}
         relations = []
         for itemTuple in result:
             if isinstance(itemTuple[0], py2neo.neo4j.Node):
-                if _id(itemTuple[0]) not in nodes:
-                    nodes[_id(itemTuple[0])] = itemTuple
+                if itemTuple[0].id not in nodes:
+                    nodes[itemTuple[0].id] = itemTuple
             else:
                 relations.append(itemTuple)
-        score = stream.Score()
+        score = music21.stream.Score()
         scoreNodeId = [x for x in nodes if nodes[x][1]['type'] == 'Score'][0]
         self._addMusic21Properties(score, nodes[scoreNodeId][1])
+        measures = [x for x in nodes.values() if x[1]['type'] == 'Measure']
+        self.scoreOffset = sorted([float(x[1]['offset']) for x in measures])[0]
         self._addHierarchicalMusic21Data(score, scoreNodeId, nodes, relations)
         return score
 
@@ -1508,13 +1543,17 @@ class Query(object):
         if self.returns:
             returnStr = 'return ' + ', '.join([str(x) for x in self.returns]) + '\n'
         else:
-            returnStr = 'return *\n'
+            props = []
+            [props.extend([x.pre, x.post]) for x in self.where]
+            props = [x for x in props if isinstance(x, music21.musicNet.Property)]
+            props = [str(x) for x in set(props)]
+            returnStr = 'return ' + ', '.join(['*'] + props) + '\n'
         limitStr = 'limit {maxResults}\n'
         skipStr = 'skip {minRow}\n'
         self.pattern = startStr + matchStr + whereStr + returnStr + self.order + skipStr + limitStr
         return self.pattern
 
-    def _addHierarchicalNodes(self, results, metadata):
+    def _addHierarchicalNodes(self, results, metadata, buildFullScore):
         ''' Fill in a minimal score hierarchy sufficient to contain the notes in the result.
         Then fill in all the other notes in the minimal score.
         Then add one more layer of nodes within the objects in the score 
@@ -1541,25 +1580,26 @@ class Query(object):
             q.setStartNode(n)
             subresults, meta = q.results()
             self._filterNodesAndRelationships(subresults[0], nodes, relations)
-        
-        # Fill in the other notes in the measures.
-        measures = [x for x in nodes.values() if _getPy2neoMetadata(x)['data']['type'] == 'Measure']
-        self.scoreOffset = sorted([float(_getPy2neoMetadata(x)['data']['offset']) for x in measures])[0]
-        for m in measures:
-            self._addChildren(m, 'NoteInMeasure', nodes, relations)
 
-        # Add one more layer of objects below the existing ones.
-        rTypes = self.db.listRelationshipTypes()
-        for node in nodes.values():
-            nType = _getPy2neoMetadata(node)['data']['type']
-            inNodeRTypes = [x for x in rTypes if x['end'] == nType]
-            for r in inNodeRTypes:
-                rType = r['type']
-                if not (rType.endswith('In' + nType) or rType == 'spannerTo'):
-                    continue
-                if rType in ('NoteInMeasure', 'MomentInScore', 'PartInScore', 'MeasureInPart'):
-                    continue
-                self._addChildren(node, rType, nodes, relations)
+        if (buildFullScore):
+            # Fill in the other notes in the measures.
+            measures = [x for x in nodes.values() if _getPy2neoMetadata(x)['data']['type'] == 'Measure']
+            for m in measures:
+                self._addChildren(m, 'NoteInMeasure', nodes, relations)
+    
+            # Add one more layer of objects below the existing ones.
+            rTypes = self.db.listRelationshipTypes()
+            for node in nodes.values():
+                nType = _getPy2neoMetadata(node)['data']['type']
+                inNodeRTypes = [x for x in rTypes if x['end'] == nType]
+                for r in inNodeRTypes:
+                    rType = r['type']
+                    if not (rType.endswith('In' + nType) or rType == 'spannerTo'):
+                        continue
+                    if rType in ('NoteInMeasure', 'MomentInScore', 'PartInScore', 'MeasureInPart'):
+                        continue
+                    self._addChildren(node, rType, nodes, relations)
+
         results.extend(nodes.values())
         results.extend(relations.values())
 
@@ -1893,10 +1933,6 @@ class TestExternal(unittest.TestCase):
         pass
 
 _DOC_ORDER = [Query, Database, Entity, Node, Relationship, Property, Filter, Moment]
-
-if __name__ == "__main__":
-    _prepDoctests()
-    music21.mainTest(Test)
 
 # This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. 
 # If a copy of the MPL was not distributed with this file, You can obtain one at 
