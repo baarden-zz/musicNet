@@ -157,7 +157,6 @@ inQueue = Queue.Queue()
 outQueue = Queue.Queue()
 previewGen = GeneratePreviews(inQueue, outQueue)
 previewGen.daemon = True
-previewGen.start()
 
 '''
 listScores
@@ -569,6 +568,7 @@ def prepareQuery():
     if previews and q.returns:
         return { 'error': '"makePreviews" and "results" cannot be combined in the same query' }
     pattern = q._assemblePattern()
+    print pattern
     ipAddr = bottle.request.remote_addr or "None"
     token = hash(ipAddr + pattern)
     app.tokens[token] = [pattern, columns, previews, time.time()]
@@ -804,8 +804,17 @@ def expireTokens():
             del app.tokens[token]
 
 
-if __name__ == "__main__":
-    bottle.run(app, host='10.0.1.99', port=8080, reloader=True)
+if __name__ == "__main__":    
+    print "Loading relationship types..."
+    app.db.listRelationshipTypes()
+    print "Loading node property values..."
+    app.db.listNodePropertyValues()
+    print "Loading relationship property values..."
+    app.db.listRelationshipPropertyValues()
+    
+    previewGen.start()
+    bottle.run(app, host='127.0.0.1', port=8080) #reloader=True
+    
     
 # This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. 
 # If a copy of the MPL was not distributed with this file, You can obtain one at 

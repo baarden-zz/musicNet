@@ -637,9 +637,9 @@ class Database(object):
             offset = nodeLookup[noteObj]['parent'].offset + noteObj.offset
             if 'voice' not in nodeLookup[noteObj]:
                 nodeLookup[noteObj]['voice'] = 1
-            addVoiceleading(db, False, noteObj, offset)
+            addVoiceleading(db, 'False', noteObj, offset)
             if noteObj.offset % 1 == 0:
-                addVoiceleading(db, True, noteObj, offset)
+                addVoiceleading(db, 'True', noteObj, offset)
         self.addPropertyCallback('Note', addNoteVoiceleading)
 
         # Pitch
