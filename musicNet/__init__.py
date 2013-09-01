@@ -210,6 +210,7 @@ def _convertFromString(val):
             except ValueError: pass
     return val
 
+# return the ID of a py2neo object
 def _id(item):
     return item.__dict__['_id']
 
@@ -355,6 +356,7 @@ class Database(object):
         inMetadata = q.addRelationship(relationType='ContributorInMetaData', end=meta, optional=True)
         contributor = inMetadata.start
         q.addReturns(meta.movementName, contributor._names, score.corpusFilepath)
+        q.limitReturnToWhere = True
         results, meta = q.results(start, limit)
         columns = [x[x.find('.') + 1:] for x in meta]
         scores = {}
@@ -471,6 +473,7 @@ class Database(object):
             q = Query(self)
             r = q.setStartRelationship(relationType=relateType)
             q.addReturns(r.start.type, r.end.type)
+            q.limitReturnToWhere = True;
             results, meta = q.results(limit=100)
             for n1, n2 in results:
                 rTypes.add( (n1, relateType, n2) )
@@ -655,12 +658,19 @@ class Database(object):
 
         # Duration
         def addDurationToParent(db, durationObj):
+            if (durationObj.quarterLength == 0):
+                return HIDEFROMDATABASE
             nodeLookup = db._extractState['nodeLookup']
             parent = nodeLookup[durationObj]['parent']
             parentType = parent.__class__.__name__
             vertex = nodeLookup[parent]['vertex']
             if parentType not in ('StaffGroup', 'Instrument', 'Metadata'):
                 vertex['quarterLength'] = durationObj.quarterLength
+                if (durationObj.tuplets):
+                    tuplets = []
+                    for tuplet in durationObj.tuplets:
+                        tuplets.append(tuplet.tupletActual[0] + ':' + tuplet.tupletNormal[0])
+                    vertex['tuplet'] = '*'.join(tuplets)
             if parentType == 'Note':
                 vertex['isGrace'] = durationObj.isGrace
                 if hasattr(durationObj, 'stealTimePrevious'):
@@ -1041,6 +1051,7 @@ class Query(object):
         self.start = self.pattern = None
         self.match = []
         self.where = []
+        self.limitReturnToWhere = False
         self.orders = []
         self.returns = []
         self.returnStr = ''
@@ -1337,7 +1348,7 @@ class Query(object):
         "queryName" attribute that contains the query column name.
         '''
         self.nodeLookup = {}
-        result = resultList[:]
+        result = [r for r in resultList if isinstance(r, py2neo.neo4j.Node) and _getPy2neoMetadata(r)['data']['type'] == 'Note']
         # add hierarchical nodes and result properties if that hasn't happened already
         self._addHierarchicalNodes(result, metadata, True)
         result = self.getResultProperties(result)
@@ -1345,8 +1356,8 @@ class Query(object):
         relations = []
         for itemTuple in result:
             if isinstance(itemTuple[0], py2neo.neo4j.Node):
-                if itemTuple[0].id not in nodes:
-                    nodes[itemTuple[0].id] = itemTuple
+                if _id(itemTuple[0]) not in nodes:
+                    nodes[_id(itemTuple[0])] = itemTuple
             else:
                 relations.append(itemTuple)
         score = music21.stream.Score()
@@ -1402,7 +1413,7 @@ class Query(object):
         
         # PartInScore
         def removePartNumber(self, partDict, part, score, r):
-            del partDict['number']
+            partDict.pop('number', None)
             score.insert(part)
             return part
         self.setObjectCallback('PartInScore', removePartNumber)
@@ -1410,20 +1421,22 @@ class Query(object):
         # MeasureInPart
         def addSignaturesAndClefs(self, measureDict, measure, part, r):
             firstMeasure = (_convertFromString(measureDict['offset']) == self.scoreOffset)
-            if measureDict['clefIsNew'] == 'True' or firstMeasure:
+            if 'clef' in measureDict and (measureDict['clefIsNew'] == 'True' or firstMeasure):
                 classLookup = self._listMusic21Classes()
                 clef = classLookup[measureDict['clef']]()
                 measure.insert(clef)
-            if measureDict['keyIsNew'] == 'True' or firstMeasure:
+            if 'keySignatureSharps' in measureDict and (measureDict['keyIsNew'] == 'True' or firstMeasure):
                 sharps = _convertFromString(measureDict['keySignatureSharps'])
                 keySig = music21.key.KeySignature(sharps)
-                keySig.mode = _convertFromString(measureDict['keySignatureMode'])
+                if 'keySignatureMode' in measureDict:
+                    keySig.mode = _convertFromString(measureDict['keySignatureMode'])
                 measure.insert(keySig)
-            if measureDict['timeSignatureIsNew'] == 'True' or firstMeasure:
+            if 'timeSignature' in measureDict and (measureDict['timeSignatureIsNew'] == 'True' or firstMeasure):
                 timeSig = meter.TimeSignature(measureDict['timeSignature'])
                 measure.insert(timeSig)
             for key in ('clef', 'keySignatureSharps', 'keySignatureMode', 'timeSignature'):
-                del measureDict[key]
+                if key in measureDict:
+                    del measureDict[key]
             part.insert(measure)
             return measure
         self.setObjectCallback('MeasureInPart', addSignaturesAndClefs)
@@ -1440,16 +1453,25 @@ class Query(object):
         def setPitchAndDuration(self, noteDict, note, measure, r):
             # .nameWithOctave is not read/write in music21 1.0.
             import re
-            name = re.sub('[0-9]*', '', noteDict['pitch'])
-            note.midi = int(noteDict['midi'])
-            note.name = name
-            note.duration.isGrace = _convertFromString(noteDict['isGrace'])
-            if note.duration.isGrace:
-                for attr in ('stealTimePrevious', 'stealTimeFollowing', 'slash'):
-                    setattr(note.duration, attr, noteDict[attr])
-            del noteDict['pitch']
-            del noteDict['midi']
-            del noteDict['isGrace']
+            if ('pitch' in noteDict):
+                name = re.sub('[0-9]*', '', noteDict['pitch'])
+                note.midi = int(noteDict['midi'])
+                note.name = name
+                del noteDict['pitch']
+                del noteDict['midi']
+            if ('tuplet' in noteDict):
+                tuplets = noteDict['tuplet'].split('*')
+                for tupletString in tuplets:
+                    actual, normal = tupletString.split(':')
+                    tuplet = duration.Tuplet(actual, normal)
+                    note.appendTuplet(tuplet)
+                del noteDict['tuplet']
+            if ('isGrace' in noteDict):
+                note.duration.isGrace = _convertFromString(noteDict['isGrace'])
+                if note.duration.isGrace:
+                    for attr in ('stealTimePrevious', 'stealTimeFollowing', 'slash'):
+                        setattr(note.duration, attr, noteDict[attr])
+                del noteDict['isGrace']
             measure.insert(note)
             return note
         self.setObjectCallback('NoteInMeasure', setPitchAndDuration)
@@ -1540,14 +1562,17 @@ class Query(object):
             matchStr = 'match\n' + ',\n'.join([str(x) for x in self.match]) + '\n'
         if self.where:
             whereStr = 'where\n' + '\nand '.join([str(x) for x in self.where]) + '\n'
+        props = []
         if self.returns:
-            returnStr = 'return ' + ', '.join([str(x) for x in self.returns]) + '\n'
-        else:
-            props = []
-            [props.extend([x.pre, x.post]) for x in self.where]
-            props = [x for x in props if isinstance(x, music21.musicNet.Property)]
-            props = [str(x) for x in set(props)]
-            returnStr = 'return ' + ', '.join(['*'] + props) + '\n'
+            props = self.returns[:]
+#            returnStr = 'return ' + ', '.join([str(x) for x in self.returns]) + '\n'
+#       else:
+        if self.limitReturnToWhere == False:
+            props.append('*')
+#            [props.extend([x.pre, x.post]) for x in self.where]
+#            props = [x for x in props if isinstance(x, music21.musicNet.Property) and x.name != 'ID']
+        props = [str(x) for x in set(props)]
+        returnStr = 'return ' + ', '.join(props) + '\n'
         limitStr = 'limit {maxResults}\n'
         skipStr = 'skip {minRow}\n'
         self.pattern = startStr + matchStr + whereStr + returnStr + self.order + skipStr + limitStr
@@ -1600,24 +1625,23 @@ class Query(object):
                         continue
                     self._addChildren(node, rType, nodes, relations)
 
-        results.extend(nodes.values())
-        results.extend(relations.values())
+        results[:] = nodes.values() + relations.values()
 
     def _filterNodesAndRelationships(self, results, nodes, relations):
         ''' Nodes and Relations must be hashed separately to avoid ID number clashes.
         '''
         for item in results:
             if isinstance(item, py2neo.neo4j.Node):
-                if item._id not in nodes:
-                    nodes[item._id] = item
-            else:
-                relations[item._id] = item
+                if _id(item) not in nodes:
+                    nodes[_id(item)] = item
+            elif isinstance(item, py2neo.neo4j.Relationship):
+                relations[_id(item)] = item
     
     def _addChildren(self, node, rType, nodes, relations):
         ''' Add all the children of this node that are connected by the specified Relationship type.
         '''
         q = Query(self.db)
-        n = Node(q, nodeId=node._id)
+        n = Node(q, nodeId=_id(node))
         q.setStartNode(n)
         q.addRelationship(relationType=rType, end=n)
         subresults, meta = q.results(limit=500)
@@ -1752,7 +1776,7 @@ class Node(Entity):
         self._addName(name)
 
     def __repr__(self):
-        return self.name    
+        return self.name
         
 class Relationship(Entity):
     '''An object that represents a database relationship in a query.
@@ -1816,6 +1840,8 @@ class Property(Entity):
         self.name = name
         
     def __repr__(self):
+        if (self.name == 'ID'):
+            return 'ID(%s)' % self.parent.name
         return '%s.%s' % (self.parent.name, self.name)
     
     def __getattr__(self):

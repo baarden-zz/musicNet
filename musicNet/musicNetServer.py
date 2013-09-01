@@ -135,8 +135,8 @@ class GeneratePreviews(threading.Thread):
         conv.loadFromMusic21Object(score)
         header = [x for x in conv.context.contents if isinstance(x, music21.lily.lilyObjects.LyLilypondHeader)][0]
         header.lilypondHeaderBody = 'tagline = ""'
-        with Silence():
-            conv.runThroughLily(backend='eps -dresolution=200', format='png', fileName=filename)
+        #with Silence():
+        conv.runThroughLily(backend='eps -dresolution=200', format='png', fileName=filename)
         from subprocess import call
         filename += '.png'
         call(['convert', '-trim', filename, filename])
@@ -155,8 +155,11 @@ app.images = {}
 
 inQueue = Queue.Queue()
 outQueue = Queue.Queue()
-previewGen = GeneratePreviews(inQueue, outQueue)
-previewGen.daemon = True
+previewWorkers = []
+for i in range(10):
+    worker = GeneratePreviews(inQueue, outQueue)
+    worker.daemon = True
+    previewWorkers.append(worker)
 
 '''
 listScores
@@ -493,6 +496,7 @@ def prepareQuery():
     req = bottle.request.json
     q = music21.musicNet.Query(app.db)
     nodes = {}
+    scoreNode = None
     relations = {}
     properties = {}
     notes = []
@@ -500,6 +504,7 @@ def prepareQuery():
     parts = {}
     instruments = {}
     score = {}
+    columns = []
     if not req.get('nodes', False):
         return { 'error': 'query has no nodes' }
     for n in req['nodes']:
@@ -507,6 +512,9 @@ def prepareQuery():
         nodes[n['name']] = node
         if (n['type'] == 'Note'):
             notes.append(node)
+            columns.append(n['name'])
+        elif (n['type'] == 'Score'):
+            scoreNode = node
     for r in req.get('relationships', []):
         start = nodes[r['start']]
         end = nodes[r['end']]
@@ -539,14 +547,12 @@ def prepareQuery():
     if 'comparisonFilters' in req:
         for f in req['comparisonFilters']:
             addComparisonFilter(q, f, properties)
-    columns = []
-    if 'returns' in req:
-        for r in req['returns']:
-            columns = q.addReturns(properties[r['property']])
-        if columns:
-            columns = [x.name for x in columns]
-    if not columns:
-        columns = nodes.keys() + relations.keys() + [str(x) for x in properties.values()]
+    if 'returns' in req and req['returns']:
+        returns = [properties[r['property']] for r in req['returns']]
+        columns.extend(returns);
+        q.addReturns(*returns)
+    #else:
+    #    columns.extend(properties.values())
     for n in notes:
         if n not in measures.keys():
             m = q.addNode('Measure', 'measure_' + n.name)
@@ -561,14 +567,19 @@ def prepareQuery():
         if p not in instruments.keys():
             i = q.addNode('Instrument', 'instrument_' + p.name)
             r = q.addRelationship(relationType='InstrumentInPart', start=i, end=p, name=i.name+'In'+p.name, optional=True)
-        if p not in score.keys():
-            s = q.addNode('Score', 'score_' + p.name)
-            r = q.addRelationship(relationType='PartInScore', start=p, end=s, name=p.name+'In'+s.name, optional=True)
+    if scoreNode == None:
+        scoreNode = q.addNode('Score', 'Score')
+    if len(score) == 0:
+        p = parts.itervalues().next()
+        r = q.addRelationship(relationType='PartInScore', start=p, end=scoreNode, name=p.name+'In'+scoreNode.name)
+    # ensure that combinations of parts are unique
+    partIds = [n['name'] for n in req['nodes'] if n['type'] == 'Part']
+    for i in range(len(partIds) - 1):
+        q.addComparisonFilter(nodes[partIds[i]].ID, '<', nodes[partIds[i+1]].ID)
     previews = req.get('makePreviews', False)
-    if previews and q.returns:
-        return { 'error': '"makePreviews" and "results" cannot be combined in the same query' }
+    #if previews and 'returns' in req:
+    #    return { 'error': '"makePreviews" and "results" cannot be combined in the same query' }
     pattern = q._assemblePattern()
-    print pattern
     ipAddr = bottle.request.remote_addr or "None"
     token = hash(ipAddr + pattern)
     app.tokens[token] = [pattern, columns, previews, time.time()]
@@ -667,8 +678,6 @@ def results():
                 if objects_meta[i] in columns:
                     output_objects.append(result[i][0])
                     output_meta.append(objects_meta[i])
-            print output_meta
-            print output_objects
             inQueue.put({ 'index': queryIdx, 'result': output_objects, 'metadata': output_meta, 'token': token })
         if idx == 0:
             item = { 'type': 'metadata', 'data': meta_output }
@@ -812,7 +821,8 @@ if __name__ == "__main__":
     print "Loading relationship property values..."
     app.db.listRelationshipPropertyValues()
     
-    previewGen.start()
+    for worker in previewWorkers:
+        worker.start()
     bottle.run(app, host='127.0.0.1', port=8080) #reloader=True
     
     
