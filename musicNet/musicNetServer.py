@@ -820,7 +820,13 @@ def expireTokens():
             del app.tokens[token]
 
 
-if __name__ == "__main__":    
+if __name__ == "__main__":
+    import optparse
+    parser = optparse.OptionParser()
+    parser.add_option('-a', '--address', dest='address', default='127.0.0.1',
+                      help='-a|--address : the IP address of the server')
+    (options, args) = parser.parse_args()
+    
     print "Loading relationship types..."
     app.db.listRelationshipTypes()
     print "Loading node property values..."
@@ -830,7 +836,7 @@ if __name__ == "__main__":
     
     for worker in previewWorkers:
         worker.start()
-    bottle.run(app, host='127.0.0.1', port=8080) #reloader=True
+    bottle.run(app, host=options.address, port=8080) #reloader=True
     
     
 # This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. 
