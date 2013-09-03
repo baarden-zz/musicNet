@@ -38,6 +38,7 @@ import os
 import time
 import json
 import tempfile
+import multiprocessing
 import Queue
 import threading
 import bottle
@@ -90,13 +91,13 @@ class Silence:
 ## end of http://code.activestate.com/recipes/577564/ }}}
 
 
-class GeneratePreviews(threading.Thread):
+class GeneratePreviews(multiprocessing.Process):
     '''
     .. doctest::
        hide
-    >>> import Queue
-    >>> inQueue = Queue.Queue()
-    >>> outQueue = Queue.Queue()
+    >>> import multiprocessing
+    >>> inQueue = multiprocessing.JoinableQueue()
+    >>> outQueue = multiprocessing.JoinableQueue()
     >>> from music21.musicNet.musicNetServer import *
     >>> previewGen = GeneratePreviews(inQueue, outQueue)
     >>> from music21 import *
@@ -106,19 +107,24 @@ class GeneratePreviews(threading.Thread):
     '''
     
     def __init__(self, inQueue, outQueue):
-        threading.Thread.__init__(self)
+        multiprocessing.Process.__init__(self)
         self.daemon = True
         self.inQueue = inQueue
         self.outQueue = outQueue
 
-    def run(self):
+    def run(self, uri='http://localhost:7474/db/data/', **kwargs):
+        # stupid hack to get py2neo to play nice with multiprocessing
+        import py2neo.rest
+        py2neo.rest._thread_local = threading.local()
+        #
+        db = music21.musicNet.Database()
         while True:
             try:
                 scoreDict = self.inQueue.get_nowait()
             except Queue.Empty:
                 time.sleep(0.25)
                 continue
-            q = music21.musicNet.Query(app.db)
+            q = music21.musicNet.Query(db)
             score = q.music21Score(scoreDict['result'], scoreDict['metadata'])
             path = self.makePreview(score)
             imageDict = { 'index': scoreDict['index'], 'path': path, 'token': scoreDict['token'] }
@@ -135,8 +141,8 @@ class GeneratePreviews(threading.Thread):
         conv.loadFromMusic21Object(score)
         header = [x for x in conv.context.contents if isinstance(x, music21.lily.lilyObjects.LyLilypondHeader)][0]
         header.lilypondHeaderBody = 'tagline = ""'
-        #with Silence():
-        conv.runThroughLily(backend='eps -dresolution=200', format='png', fileName=filename)
+        with Silence():
+            conv.runThroughLily(backend='eps -dresolution=200', format='png', fileName=filename)
         from subprocess import call
         filename += '.png'
         call(['convert', '-trim', filename, filename])
@@ -153,10 +159,11 @@ app.db = music21.musicNet.Database()
 app.tokens = {}
 app.images = {}
 
-inQueue = Queue.Queue()
-outQueue = Queue.Queue()
+m = multiprocessing.Manager()
+inQueue = m.Queue()
+outQueue = m.Queue()
 previewWorkers = []
-for i in range(10):
+for i in range(multiprocessing.cpu_count()):
     worker = GeneratePreviews(inQueue, outQueue)
     worker.daemon = True
     previewWorkers.append(worker)
