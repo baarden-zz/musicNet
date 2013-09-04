@@ -625,7 +625,7 @@ class Database(object):
                 nodeLookup = db._extractState['nodeLookup']
                 voice = nodeLookup[noteObj]['voice']
                 try:
-                    prevNote, prevOffset = history['NoteToNote'][voice]
+                    prevNote, prevOffset = history['NoteToNote'][voice][byBeat]
                     voiceleadingHistory = True
                 except KeyError:
                     voiceleadingHistory = False
@@ -634,7 +634,11 @@ class Database(object):
                         offset - prevOffset <= nodeLookup[noteObj]['parent'].barDuration):
                     mint = noteObj.midi - prevNote.midi
                     db._addEdge(prevNote, 'NoteToNote', noteObj, { 'interval': mint, 'byBeat': byBeat } )
-                history['NoteToNote'][voice] = [noteObj, offset]
+                try:
+                    saveLoc = history['NoteToNote'][voice]
+                except KeyError:
+                    saveLoc = history['NoteToNote'][voice] = {}
+                saveLoc[byBeat] = [noteObj, offset]
             
             nodeLookup = db._extractState['nodeLookup']
             offset = nodeLookup[noteObj]['parent'].offset + noteObj.offset
@@ -1580,6 +1584,7 @@ class Query(object):
 
     def _addHierarchicalNodes(self, results, metadata, buildFullScore):
         ''' Fill in a minimal score hierarchy sufficient to contain the notes in the result.
+        (Assumes only Note objects are passed in the results array.)
         Then fill in all the other notes in the minimal score.
         Then add one more layer of nodes within the objects in the score 
         (articulations, dynamics, expressions, etc.).
@@ -1588,29 +1593,49 @@ class Query(object):
         relations = {}
         self._filterNodesAndRelationships(results, nodes, relations)
         
-        # For each note in the result, fill in the structural nodes above it.
+        # Get the minimal set of measures containing these Notes
         q = Query(self.db)
         n = Node(q, 'Note')
         inMeasure = q.addRelationship(relationType='NoteInMeasure', start=n)
         inPart = q.addRelationship(relationType='MeasureInPart', start=inMeasure.end)
         inScore = q.addRelationship(relationType='PartInScore', start=inPart.end)
-        q.addRelationship(relationType='InstrumentInPart', end=inPart.end, optional=True)
-        q.addRelationship(relationType='MetadataInScore', end=inScore.end, optional=True)
-        q.addRelationship(relationType='StaffGroupInScore', end=inScore.end, optional=True)
         for i in range(len(results)):
             node = results[i]
-            if _getPy2neoMetadata(node)['data']['type'] != 'Note': continue
             node.queryName = metadata[i]
             n.id = _id(node)
             q.setStartNode(n)
             subresults, meta = q.results()
             self._filterNodesAndRelationships(subresults[0], nodes, relations)
-
+        measures = [x for x in nodes.values() if _getPy2neoMetadata(x)['data']['type'] == 'Measure']
+        measureNumbers = [_getPy2neoMetadata(x)['data']['number'] for x in measures]
+        measureRange = range(min(measureNumbers), max(measureNumbers) + 1)
+        
+        # Fill in measures in other parts and other structural nodes
+        score = [x for x in nodes.values() if _getPy2neoMetadata(x)['data']['type'] == 'Score'][0]
+        parts = [x for x in nodes.values() if _getPy2neoMetadata(x)['data']['type'] == 'Part']
+        q = Query(self.db)
+        s = Node(q, nodeId=_id(score))
+        q.setStartNode(s)
+        q.addRelationship(relationType='MetadataInScore', end=s, optional=True)
+        q.addRelationship(relationType='StaffGroupInScore', end=s, optional=True)
+        for part in parts:
+            pRelate = q.addRelationship(relationType='PartInScore', end=s)
+            p = pRelate.start
+            q.addComparisonFilter(p.ID, '=', _id(part))
+            q.addRelationship(relationType='InstrumentInPart', end=p, optional=True)
+            for number in measureRange:
+                mRelate = q.addRelationship(relationType='MeasureInPart', end=p)
+                m = mRelate.start
+                q.addComparisonFilter(m.number, '=', number)
+        subresults, meta = q.results()
+        self._filterNodesAndRelationships(subresults[0], nodes, relations)
+        
         if (buildFullScore):
             # Fill in the other notes in the measures.
             measures = [x for x in nodes.values() if _getPy2neoMetadata(x)['data']['type'] == 'Measure']
             for m in measures:
                 self._addChildren(m, 'NoteInMeasure', nodes, relations)
+                self._addChildren(m, 'RestInMeasure', nodes, relations)
     
             # Add one more layer of objects below the existing ones.
             rTypes = self.db.listRelationshipTypes()

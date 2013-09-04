@@ -787,19 +787,20 @@ def addScoreInfo(results, row, metadata, idx):
     if idx == 0:
         metadata.extend(['score', 'parts', 'measures'])
     instruments = []
-    mms = []
+    mms = set()
     filepath = ''
     for el in results:
         kind = el[1]['type']
         if (kind == 'Instrument'):
             instruments.append(el[1]['partName'])
         elif (kind == 'Measure'):
-            mms.append(el[1]['number'])
+            mms.add(el[1]['number'])
         elif (kind == 'Score'):
             filepath = el[1]['corpusFilepath']
-    measureTxt = '%d' % mms[0]
     if len(mms) > 1:
         measureTxt = '%d-%d' % (min(mms), max(mms))
+    else:
+        measureTxt = '%d' % mms.pop()
     row.extend([filepath, ','.join(instruments), measureTxt])
 
 def objectValueMap(data):
