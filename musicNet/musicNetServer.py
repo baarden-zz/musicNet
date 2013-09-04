@@ -579,13 +579,7 @@ def prepareQuery():
     if len(score) == 0:
         p = parts.itervalues().next()
         r = q.addRelationship(relationType='PartInScore', start=p, end=scoreNode, name=p.name+'In'+scoreNode.name)
-    # ensure that combinations of parts are unique
-    partIds = [n['name'] for n in req['nodes'] if n['type'] == 'Part']
-    for i in range(len(partIds) - 1):
-        q.addComparisonFilter(nodes[partIds[i]].ID, '<', nodes[partIds[i+1]].ID)
     previews = req.get('makePreviews', False)
-    #if previews and 'returns' in req:
-    #    return { 'error': '"makePreviews" and "results" cannot be combined in the same query' }
     pattern = q._assemblePattern()
     ipAddr = bottle.request.remote_addr or "None"
     token = hash(ipAddr + pattern)

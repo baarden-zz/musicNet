@@ -749,8 +749,8 @@ class Database(object):
                     if note2 in simuls and note1 in simuls[note2]:
                         continue
                     simuls[note1][note2] = True
-                    cInt = note1.midi - note2.midi
-                    sInt = _signedModulo(note1.midi - note2.midi, 12)
+                    cInt = abs(note1.midi - note2.midi)
+                    sInt = abs(_signedModulo(note1.midi - note2.midi, 12))
                     properties = { 'harmonicInterval': cInt,
                                    'simpleHarmonicInterval': sInt,
                                    'sameOffset': 'False' }
@@ -1025,6 +1025,9 @@ class Query(object):
     other nodes. Any number of nodes can be connected using relationships.
     Each node and relationship in the database has properties, and we use them to filter
     our search using the :meth:`addComparisonFilter` method. 
+    
+    Note that if you create potentially symmetrical queries spanning multiple parts 
+    you may get duplicate results.
     
     By default, results are returned as references to entities in the database,
     which can be used by the :meth:`music21Score` method to return a music21
