@@ -78,12 +78,14 @@ Contents
 #Authorization on databases doesn't appear to work with .create().
 #Tornado __del__ errors on exit should be fixed!
 
-
+import os
 import sys
 import time
 import random
 import weakref
 import unittest, doctest
+import json
+import sqlite3
 import py2neo.neo4j
 import py2neo.rest
 import music21
@@ -272,7 +274,16 @@ class Database(object):
                                '_idLastDeepCopyOf', '_mutable', '_elements', '_cache', 'isFlat', 
                                'autosort', '_components', '_unlinkedDuration', 'isSorted', 
                                'flattenedRepresentationOf', '_reprHead', 'idLocal', 'autoSort',
-                               'inherited', '_fullyQualifiedClasses', 'filePath', 'fileFormat', 'fileNumber') 
+                               'inherited', '_fullyQualifiedClasses', 'filePath', 'fileFormat', 
+                               'fileNumber', 'spannedElements') 
+    def _setupSQL(self):
+        sqlite3.register_converter("JSON", json.loads)
+        self.sqldb = sqlite3.connect('musicnet_import.db')
+        c = self.sqldb.cursor()
+        sql = '''CREATE TABLE nodeLookup (parent INTEGER, vertex JSON, noderef INTEGER);
+                 CREATE TABLE edges (startnode INTEGER, relationship TEXT, endnode INTEGER, properties JSON);'''
+        c.execute(sql)
+        c.commit()
 
     def wipeDatabase(self):
         '''Removes all relationships and nodes from the database.
@@ -600,19 +611,23 @@ class Database(object):
         def labelChordNotes(db, chordObj):
             nodeLookup = db._extractState['nodeLookup']
             chordObj.sortAscending(inPlace=True)
+            measureObj = nodeLookup[chordObj]['parent']
             for i in range(len(chordObj)):
                 noteObj = chordObj[i]
-                nodeLookup[nodeObj]['voice'] = len(chordObj) - i
-                nodeLookup[noteObj]['parent'] = nodeLookup[chordObj]['parent']
+                nodeLookup[noteObj] = { 'parent': measureObj, 
+                                        'vertex': { 'voice': len(chordObj) - i } }
+                db._addNode(noteObj)
             return HIDEFROMDATABASE
         self.addPropertyCallback('Chord', labelChordNotes)
         
         # Voice
         def labelVoiceNotes(db, voice):
             nodeLookup = db._extractState['nodeLookup']
+            measureObj = nodeLookup[voice]['parent']
             for noteObj in voice:
-                nodeLookup[noteObj]['voice'] = int(_id(voice))
-                nodeLookup[noteObj]['parent'] = nodeLookup[voice]['parent']
+                nodeLookup[noteObj] = { 'parent': measureObj, 
+                                        'vertex': { 'voice': int(voice.id) } }
+                db._addNode(noteObj)
             return HIDEFROMDATABASE
         self.addPropertyCallback('Voice', labelVoiceNotes)
 
@@ -623,7 +638,7 @@ class Database(object):
                     return
                 history = db._extractState['history']
                 nodeLookup = db._extractState['nodeLookup']
-                voice = nodeLookup[noteObj]['voice']
+                voice = nodeLookup[noteObj]['vertex']['voice']
                 try:
                     prevNote, prevOffset = history['NoteToNote'][voice][byBeat]
                     voiceleadingHistory = True
@@ -642,11 +657,13 @@ class Database(object):
             
             nodeLookup = db._extractState['nodeLookup']
             offset = nodeLookup[noteObj]['parent'].offset + noteObj.offset
-            if 'voice' not in nodeLookup[noteObj]:
-                nodeLookup[noteObj]['voice'] = 1
+            vertex = nodeLookup[noteObj]['vertex']
+            if 'voice' not in vertex:
+                vertex['voice'] = 1
             addVoiceleading(db, 'False', noteObj, offset)
             if noteObj.offset % 1 == 0:
                 addVoiceleading(db, 'True', noteObj, offset)
+            del vertex['voice']
         self.addPropertyCallback('Note', addNoteVoiceleading)
 
         # Pitch
@@ -673,7 +690,7 @@ class Database(object):
                 if (durationObj.tuplets):
                     tuplets = []
                     for tuplet in durationObj.tuplets:
-                        tuplets.append(tuplet.tupletActual[0] + ':' + tuplet.tupletNormal[0])
+                        tuplets.append('%d:%d' % (tuplet.tupletActual[0], tuplet.tupletNormal[0]))
                     vertex['tuplet'] = '*'.join(tuplets)
             if parentType == 'Note':
                 vertex['isGrace'] = durationObj.isGrace
@@ -864,7 +881,11 @@ class Database(object):
     def _addNode(self, node):
         kind = node.__class__.__name__
         nodeLookup = self._extractState['nodeLookup']
-        vertex = nodeLookup[node]['vertex'] = { 'type': kind }
+        try:
+            vertex = nodeLookup[node]['vertex']
+        except KeyError:
+            vertex = nodeLookup[node]['vertex'] = {}
+        vertex['type'] = kind
         if hasattr(node, 'offset'):
             vertex['offset'] = node.offset
         if self._runCallbacks(node) != None:
@@ -930,7 +951,7 @@ class Database(object):
                 continue
             elif isinstance(val, music21.musicxml.base.MusicXMLElement):
                 continue
-            elif hasattr(val, '__dict__'): 
+            elif hasattr(val, '__dict__'):
                 self._extractNodes(val, obj)
                 continue
             if key == 'type':
@@ -1555,7 +1576,7 @@ class Query(object):
             for cName, ref in classes:
                 self.m21_classes[mName][cName] = ref
 
-    def _assemblePattern(self):
+    def _assemblePattern(self, distinct=False):
 #        for node in self.nodes:
 #            self.addComparisonFilter(node.type, '=', node.nodeType)
         if self.pattern:
@@ -1579,7 +1600,10 @@ class Query(object):
 #            [props.extend([x.pre, x.post]) for x in self.where]
 #            props = [x for x in props if isinstance(x, music21.musicNet.Property) and x.name != 'ID']
         props = [str(x) for x in set(props)]
-        returnStr = 'return ' + ', '.join(props) + '\n'
+        distinctStr = ''
+        if (distinct):
+            distinctStr = 'distinct '
+        returnStr = 'return ' + distinctStr + ', '.join(props) + '\n'
         limitStr = 'limit {maxResults}\n'
         skipStr = 'skip {minRow}\n'
         self.pattern = startStr + matchStr + whereStr + returnStr + self.order + skipStr + limitStr

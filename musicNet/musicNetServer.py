@@ -580,7 +580,7 @@ def prepareQuery():
         p = parts.itervalues().next()
         r = q.addRelationship(relationType='PartInScore', start=p, end=scoreNode, name=p.name+'In'+scoreNode.name)
     previews = req.get('makePreviews', False)
-    pattern = q._assemblePattern()
+    pattern = q._assemblePattern(distinct=True)
     ipAddr = bottle.request.remote_addr or "None"
     token = hash(ipAddr + pattern)
     app.tokens[token] = [pattern, columns, previews, time.time()]
