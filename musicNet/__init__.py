@@ -86,11 +86,11 @@ import weakref
 import unittest, doctest
 import json
 import sqlite3
+import py2neo
 import py2neo.neo4j
-import py2neo.rest
+#import py2neo.rest
 import music21
 from music21 import *
-
 
 def _prepDoctests():
     '''This function is run before starting doctests. 
@@ -182,7 +182,7 @@ def _signedModulo(val, mod):
     if val == 0:
         return 0
     sign = val / abs(val)
-    while abs(val) > mod:
+    while abs(val) >= mod:
         val -= mod * sign
     return val
 
@@ -214,15 +214,15 @@ def _convertFromString(val):
 
 # return the ID of a py2neo object
 def _id(item):
-    return item.__dict__['_id']
+    return item._id #__dict__['_id']
 
 def _serverCall(func, *args):
     while True:
-        try:
-            r = func(*args)
-        except py2neo.rest.SocketError:
-            time.sleep(0.2)
-            continue
+ #       try:
+        r = func(*args)
+#        except py2neo.rest.SocketError:
+#            time.sleep(0.2)
+#            continue
         return r    
 
 def _fix535(results, metadata):
@@ -235,6 +235,115 @@ def _fix535(results, metadata):
     if (orderColumn > -1):
         for i in range(len(results)):
             results[i].pop(orderColumn)
+
+class NodeFarm():
+    
+    def __init__(self):
+        sqlite3.register_converter("JSON", json.loads)
+        self.dbFile = './musicnet_import_%d.db' % os.getpid()
+        self.sqldb = sqlite3.connect(self.dbFile, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+        self.sqldb.row_factory = sqlite3.Row
+        c = self.sqldb.cursor()
+        c.execute('DROP TABLE IF EXISTS nodeLookup;')
+        c.execute('CREATE TABLE nodeLookup (hash INTEGER, parentHash INTEGER, vertex JSON, nodeRef INTEGER);')
+        c.execute('DROP TABLE IF EXISTS edges;')
+        c.execute('CREATE TABLE edges (startNodeHash INTEGER, relationship TEXT, endNodeHash INTEGER, properties JSON);')
+        c.execute('CREATE INDEX nodeLookup_hash_IDX on nodeLookup (hash);')
+        self.sqldb.commit()
+        self.writeBuffer = []
+        
+    def __del__(self):
+        #if hasattr(self, 'dbFile'):
+        self.sqldb.close()
+        while os.path.exists(self.dbFile):
+            os.remove(self.dbFile)
+
+    def flushBuffer(self):
+        if len(self.writeBuffer) == 0:
+            return
+        c = self.sqldb.cursor()
+        for command in self.writeBuffer:
+            c.execute(*command)
+        self.sqldb.commit()
+        self.writeBuffer = []
+    
+    def addNode(self, obj, parent, vertex=None):
+        if len(self.writeBuffer) > 1000:
+            self.flushBuffer()
+        parentHash = parent
+        if parent and not isinstance(parent, int):
+            parentHash = hash(parent)
+        if not vertex:
+            vertex = {}
+        vertex['type'] = obj.__class__.__name__
+        vertexJSON = json.dumps(vertex)
+        values = { 'hash': hash(obj),
+                   'parentHash': parentHash,
+                   'vertex': vertexJSON }
+        sql = 'INSERT INTO nodeLookup (hash, parentHash, vertex) VALUES (:hash, :parentHash, :vertex); '
+        self.writeBuffer.append( (sql, values) )
+        valuesCopy = values.copy()
+        valuesCopy['vertex'] = vertex
+        return valuesCopy
+    
+    def updateNode(self, node, column, value):
+        if len(self.writeBuffer) > 1000:
+            self.flushBuffer()
+        if column == 'vertex':
+            value = json.dumps(value)
+        values = { 'hashValue': node['hash'],
+                   'value': value }
+        sql = 'UPDATE nodeLookup SET %s = :value WHERE hash = :hashValue; ' % column
+        self.writeBuffer.append( (sql, values) )
+    
+    def addEdge(self, start, relation, end, properties=None):
+        if len(self.writeBuffer) > 1000:
+            self.flushBuffer()
+        startHash = start
+        if not isinstance(start, int):
+            startHash = hash(start)
+        endHash = end
+        if not isinstance(end, int):
+            endHash = hash(end)
+        if not isinstance(startHash, int) or not isinstance(endHash, int):
+            raise Exception('bad hash!')
+        values = { 'start': startHash,
+                   'relation': relation, 
+                   'end': endHash }
+        if properties:
+            sql = 'INSERT INTO edges (startNodeHash, relationship, endNodeHash, properties) VALUES (:start, :relation, :end, :props); '
+            values['props'] = json.dumps(properties)
+        else:
+            sql = 'INSERT INTO edges (startNodeHash, relationship, endNodeHash) VALUES (:start, :relation, :end); '
+        self.writeBuffer.append( (sql, values) )
+        return values
+
+    def getNodeFromHash(self, hashVal):
+        self.flushBuffer()
+        c = self.sqldb.cursor()
+        c.execute('SELECT * FROM nodeLookup WHERE hash = ?;', (hashVal,))
+        return c.fetchone()
+    
+    def getNodeFromObject(self, obj):
+        return self.getNodeFromHash(hash(obj))
+    
+    def getNodeBatch(self, startIdx, limit=100):
+        self.flushBuffer()
+        c = self.sqldb.cursor()
+        c.execute('SELECT * FROM nodeLookup WHERE ROWID > :startIdx LIMIT :limit;', locals())
+        results = []
+        while True:
+            result = c.fetchone()
+            if not result:
+                break
+            results.append(result)
+        return results
+    
+    def getEdgeBatch(self, startIdx, limit=100):
+        self.flushBuffer()
+        c = self.sqldb.cursor()
+        c.execute('SELECT * FROM edges WHERE ROWID > :startIdx LIMIT :limit;', locals())
+        return c.fetchall()    
 
 #-------------------------------------------------------------------------------
 class Database(object):
@@ -257,7 +366,8 @@ class Database(object):
     _DOC_ATTR = {
     'graph_db': 'The instance of a :class:`py2neo.neo4j.GraphDatabaseService` object connected to this object, which is in turn connected to a Neo4j server either at the default location on the present computer, or the one specified by the Database `uri` argument.',             
     }
-    
+    HIDEFROMDATABASE = 1
+
     def __init__(self, uri='http://localhost:7474/db/data/', **kwargs):
         try:
             self.graph_db = py2neo.neo4j.GraphDatabaseService(uri, **kwargs)
@@ -269,6 +379,7 @@ class Database(object):
         self._extractState = {}
         self._defaultCallbacks()
         self._m21SuperclassLookup = self._inspectMusic21ExpressionsArticulations()
+        self.nodeFarm = NodeFarm()
         self._skipProperties = ('_activeSite', 'id', '_classes', 'groups', 'sites',
                                '_derivation', '_overriddenLily', '_definedContexts', '_activeSiteId', 
                                '_idLastDeepCopyOf', '_mutable', '_elements', '_cache', 'isFlat', 
@@ -276,14 +387,6 @@ class Database(object):
                                'flattenedRepresentationOf', '_reprHead', 'idLocal', 'autoSort',
                                'inherited', '_fullyQualifiedClasses', 'filePath', 'fileFormat', 
                                'fileNumber', 'spannedElements') 
-    def _setupSQL(self):
-        sqlite3.register_converter("JSON", json.loads)
-        self.sqldb = sqlite3.connect('musicnet_import.db')
-        c = self.sqldb.cursor()
-        sql = '''CREATE TABLE nodeLookup (parent INTEGER, vertex JSON, noderef INTEGER);
-                 CREATE TABLE edges (startnode INTEGER, relationship TEXT, endnode INTEGER, properties JSON);'''
-        c.execute(sql)
-        c.commit()
 
     def wipeDatabase(self):
         '''Removes all relationships and nodes from the database.
@@ -333,8 +436,9 @@ class Database(object):
         >>> print db.graph_db.get_relationship_count()
         1517
         '''
-        self.nodes = []
-        self.edges = []
+        self.nodeRefs = {}
+        self.maxNodes = 0
+        self.maxEdges = 0
         self._extractState = { 'verbose': verbose,
                               'nodeCnt': 0,
                               'relationCnt': 0,
@@ -479,10 +583,11 @@ class Database(object):
         rTypes = set()
         relateTypes = []
         while not relateTypes:
-            relateTypes = _serverCall(self.graph_db.get_relationship_types)
+            query = py2neo.neo4j.CypherQuery(self.graph_db, 'START r=relationship(*) RETURN DISTINCT TYPE(r);')
+            relateTypes = query.execute()
         for relateType in relateTypes:
             q = Query(self)
-            r = q.setStartRelationship(relationType=relateType)
+            r = q.setStartRelationship(relationType=relateType[0])
             q.addReturns(r.start.type, r.end.type)
             q.limitReturnToWhere = True;
             results, meta = q.results(limit=100)
@@ -570,32 +675,35 @@ class Database(object):
         self._callbacks[entity].append(callback)
 
     def _defaultCallbacks(self):
-        HIDEFROMDATABASE = 1
-                
+        HIDEFROMDATABASE = self.HIDEFROMDATABASE
+        
+        # Score
+        def addNumbersToParts(db, score, scoreVertex, emptyNode):
+            number = 0
+            for obj in score:
+                if isinstance(obj, music21.stream.Part):
+                    number = number + 1
+                    partVertex = { 'number': number }
+                    self.nodeFarm.addNode(obj, score, partVertex)
+        self.addPropertyCallback('Score', addNumbersToParts)
+        
         # Contributor
-        def addTextToContributor(db, contributor):
+        def addTextToContributor(db, contributor, vertex, metadataNode):
             contributor._names = unicode(contributor.name)
         self.addPropertyCallback('Contributor', addTextToContributor)
         
         # Part
-        def addPartNumber(db, part):
-            nodeLookup = db._extractState['nodeLookup']
-            score = nodeLookup[part]['parent']
-            for i in range(len(score)):
-                if score[i] == part:
-                    break
-            vertex = nodeLookup[part]['vertex']
-            vertex['number'] = i
+        def resetExtractState(db, part, partVertex, scoreNode):
             db._extractState['history'] = { 'NoteToNote': {} }
             for key in ('clef', 'timeSignature', 'keySignatureSharps', 'keySignatureMode'):
                 db._extractState[key] = None
-        self.addPropertyCallback('Part', addPartNumber)
+        self.addPropertyCallback('Part', resetExtractState)
                 
         # Measure
-        def addSignaturesAndClefs(db, measure):
+        def addSignaturesAndClefs(db, measure, vertex, partNode):
             if measure.clef:
                 self._extractState['clef'] = measure.clef.classes[0]
-            vertex = db._extractState['nodeLookup'][measure]['vertex']
+            #vertex['barDuration'] = self._extractState['barDuration']
             vertex['clef'] = self._extractState['clef']
             if measure.timeSignature:
                 self._extractState['timeSignature'] = measure.timeSignature.ratioString
@@ -608,37 +716,30 @@ class Database(object):
         self.addPropertyCallback('Measure', addSignaturesAndClefs)            
         
         # Chord
-        def labelChordNotes(db, chordObj):
-            nodeLookup = db._extractState['nodeLookup']
+        def labelChordNotes(db, chordObj, chordVertex, measureNode):
             chordObj.sortAscending(inPlace=True)
-            measureObj = nodeLookup[chordObj]['parent']
             for i in range(len(chordObj)):
                 noteObj = chordObj[i]
-                nodeLookup[noteObj] = { 'parent': measureObj, 
-                                        'vertex': { 'voice': len(chordObj) - i } }
-                db._addNode(noteObj)
+                noteVertex = { 'voice': len(chordObj) - i }
+                db._addNode(noteObj, measureNode, noteVertex)
             return HIDEFROMDATABASE
         self.addPropertyCallback('Chord', labelChordNotes)
         
         # Voice
-        def labelVoiceNotes(db, voice):
-            nodeLookup = db._extractState['nodeLookup']
-            measureObj = nodeLookup[voice]['parent']
+        def labelVoiceNotes(db, voice, voiceVertex, measureNode):
             for noteObj in voice:
-                nodeLookup[noteObj] = { 'parent': measureObj, 
-                                        'vertex': { 'voice': int(voice.id) } }
-                db._addNode(noteObj)
+                noteVertex = { 'voice': int(voice.id) }
+                db._addNode(noteObj, measureNode, noteVertex)
             return HIDEFROMDATABASE
         self.addPropertyCallback('Voice', labelVoiceNotes)
 
         # Note
-        def addNoteVoiceleading(db, noteObj):
-            def addVoiceleading(db, byBeat, noteObj, offset):
+        def addNoteVoiceleading(db, noteObj, vertex, measureNode):
+            def addVoiceleading(db, byBeat, noteVertex, measureNode):
                 if noteObj.isRest:
                     return
                 history = db._extractState['history']
-                nodeLookup = db._extractState['nodeLookup']
-                voice = nodeLookup[noteObj]['vertex']['voice']
+                voice = noteVertex['voice']
                 try:
                     prevNote, prevOffset = history['NoteToNote'][voice][byBeat]
                     voiceleadingHistory = True
@@ -646,7 +747,7 @@ class Database(object):
                     voiceleadingHistory = False
                 # Only calculate voiceleading for notes within the span of a measure.
                 if (voiceleadingHistory and 
-                        offset - prevOffset <= nodeLookup[noteObj]['parent'].barDuration):
+                        offset - prevOffset <= self._extractState['barDuration']):
                     mint = noteObj.midi - prevNote.midi
                     db._addEdge(prevNote, 'NoteToNote', noteObj, { 'interval': mint, 'byBeat': byBeat } )
                 try:
@@ -655,68 +756,67 @@ class Database(object):
                     saveLoc = history['NoteToNote'][voice] = {}
                 saveLoc[byBeat] = [noteObj, offset]
             
-            nodeLookup = db._extractState['nodeLookup']
-            offset = nodeLookup[noteObj]['parent'].offset + noteObj.offset
-            vertex = nodeLookup[noteObj]['vertex']
+            offset = measureNode['vertex']['offset'] + noteObj.offset
             if 'voice' not in vertex:
                 vertex['voice'] = 1
-            addVoiceleading(db, 'False', noteObj, offset)
+            addVoiceleading(db, 'False', vertex, measureNode)
             if noteObj.offset % 1 == 0:
-                addVoiceleading(db, 'True', noteObj, offset)
-            del vertex['voice']
+                addVoiceleading(db, 'True', vertex, measureNode)
+            #del vertex['voice']
         self.addPropertyCallback('Note', addNoteVoiceleading)
 
         # Pitch
-        def addPitchToNote(db, pitchObj):
-            nodeLookup = db._extractState['nodeLookup']
-            noteObj = nodeLookup[pitchObj]['parent']
-            vertex = nodeLookup[noteObj]['vertex']
-            vertex['pitch'] = pitchObj.nameWithOctave
-            vertex['midi'] = pitchObj.midi
-            vertex['microtone'] = pitchObj.microtone.cents
+        def addPitchToNote(db, pitchObj, pitchVertex, noteNode):
+            noteVertex = noteNode['vertex']
+            noteVertex['pitch'] = pitchObj.nameWithOctave
+            noteVertex['midi'] = pitchObj.midi
+            noteVertex['microtone'] = pitchObj.microtone.cents
+            self.nodeFarm.updateNode(noteNode, 'vertex', noteVertex)
             return HIDEFROMDATABASE
         self.addPropertyCallback('Pitch', addPitchToNote)
 
         # Duration
-        def addDurationToParent(db, durationObj):
+        def addDurationToParent(db, durationObj, vertex, parentNode):
             if (durationObj.quarterLength == 0):
                 return HIDEFROMDATABASE
-            nodeLookup = db._extractState['nodeLookup']
-            parent = nodeLookup[durationObj]['parent']
-            parentType = parent.__class__.__name__
-            vertex = nodeLookup[parent]['vertex']
+            parentVertex = parentNode['vertex']
+            parentType = parentVertex['type']
+            needsUpdate = False
             if parentType not in ('StaffGroup', 'Instrument', 'Metadata'):
-                vertex['quarterLength'] = durationObj.quarterLength
+                parentVertex['quarterLength'] = durationObj.quarterLength
                 if (durationObj.tuplets):
                     tuplets = []
                     for tuplet in durationObj.tuplets:
                         tuplets.append('%d:%d' % (tuplet.tupletActual[0], tuplet.tupletNormal[0]))
-                    vertex['tuplet'] = '*'.join(tuplets)
+                    parentVertex['tuplet'] = '*'.join(tuplets)
+                needsUpdate = True
             if parentType == 'Note':
-                vertex['isGrace'] = durationObj.isGrace
+                parentVertex['isGrace'] = durationObj.isGrace
                 if hasattr(durationObj, 'stealTimePrevious'):
                     for attr in ('stealTimePrevious', 'stealTimeFollowing', 'slash'):
-                        vertex[attr] = getattr(durationObj, attr)
+                        parentVertex[attr] = getattr(durationObj, attr)
+                needsUpdate = True
+            if needsUpdate:
+                self.nodeFarm.updateNode(parentNode, 'vertex', parentVertex)
             return HIDEFROMDATABASE
         self.addPropertyCallback('Duration', addDurationToParent)
         
         # MetronomeMark
-        def simplifyText(db, mm):
+        def simplifyText(db, mm, vertex, partNode):
             mm._tempoText = unicode(mm._tempoText)
         self.addPropertyCallback('MetronomeMark', simplifyText)
         
         # Expression, Articulation
-        def useAbstractType(db, obj):
+        def useAbstractType(db, obj, vertex, noteNode):
             abstractions = ('Expression', 'Articulation')
             superclass = [x for x in obj.classes if x in abstractions][0]
-            vertex = db._extractState['nodeLookup'][obj]['vertex']
             vertex['type'] = superclass
             vertex['name'] = obj.__class__.__name__
         self.addPropertyCallback('Expression', useAbstractType)
         self.addPropertyCallback('Articulation', useAbstractType)
 
         # Trill, Mordent, Turn, Schleifer
-        def simplifyOrnamentInterval(db, ornament):
+        def simplifyOrnamentInterval(db, ornament, vertex, noteNode):
             if not hasattr(ornament, 'size'):
                 return
             if not isinstance(ornament.size, (str, unicode)):
@@ -727,26 +827,22 @@ class Database(object):
         self.addPropertyCallback('Schleifer', simplifyOrnamentInterval)
 
         # Beams
-        def addBeams(db, beams):
-            nodeLookup = db._extractState['nodeLookup']
-            noteObj = nodeLookup[beams]['parent']
+        def addBeams(db, beams, vertex, noteNode):
             for beam in beams.beamsList:
-                nodeLookup[beam] = { 'parent': noteObj }
-                db._addNode(beam)
+                db._addNode(beam, noteNode)
             return HIDEFROMDATABASE
         self.addPropertyCallback('Beams', addBeams)
         
         # Clef
-        def addMidmeasureClefs(db, clefObj):
+        def addMidmeasureClefs(db, clefObj, vertex, measureNode):
             if clefObj.offset == 0:
                 return HIDEFROMDATABASE
-            vertex = db._extractState['nodeLookup'][clefObj]['vertex']
             vertex['type'] = 'MidmeasureClef'
             vertex['name'] = clefObj.__class__.__name__
         self.addPropertyCallback('Clef', addMidmeasureClefs)
         
         # Moment
-        def addCrossPartRelationships(db, moment):
+        def addCrossPartRelationships(db, moment, vertex, scoreNode):
             simultaneous = list(moment.simultaneous)
             for noteObj in simultaneous:
                 db._addEdge(noteObj, 'MomentInNote', moment, { 'startMoment': False })
@@ -777,7 +873,7 @@ class Database(object):
         self.addPropertyCallback('Moment', addCrossPartRelationships)
         
         # Spanner
-        def addSpannerRelationship(db, span):
+        def addSpannerRelationship(db, span, vertex, parentNode):
             kind = span.__class__.__name__
             if len(span.getSpannedElements()) > 2:
                 if kind == 'StaffGroup':
@@ -798,7 +894,7 @@ class Database(object):
 
         # Optional objects
         # NoteEditorial
-        def skipIfEmpty(db, obj):
+        def skipIfEmpty(db, obj, vertex=None, parentNode=None):
             objDict = obj.__dict__
             for key, val in objDict.iteritems():
                 if key in self._skipProperties:
@@ -814,11 +910,16 @@ class Database(object):
             return HIDEFROMDATABASE
         self.addPropertyCallback('NoteEditorial', skipIfEmpty)
         
-        # Omitted objects
-        # TimeSignature, KeySignature, MiscTandam
-        def skipThisObject(db, obj):
+        # TimeSignature
+        def getBarDuration(db, timeSig, vertex, measureNode):
+            self._extractState['barDuration'] = timeSig.barDuration.quarterLength
             return HIDEFROMDATABASE
-        self.addPropertyCallback('TimeSignature', skipThisObject)
+        self.addPropertyCallback('TimeSignature', getBarDuration)
+        
+        # Omitted objects
+        # KeySignature, MiscTandam
+        def skipThisObject(db, obj, vertex, parentNode):
+            return HIDEFROMDATABASE
         self.addPropertyCallback('KeySignature', skipThisObject)
         self.addPropertyCallback('MiscTandam', skipThisObject)
 
@@ -852,21 +953,18 @@ class Database(object):
             sys.stderr.write('=' * increment)
             self.lastProgress = progress
     
-    def _extractNodes(self, obj, parent=None):
+    def _extractNodes(self, obj, parentNode=None):
         '''
         Put all the hierarchical nodes and their relationships into linear order.
         At this point relationships store references to the original music21 objects.
         '''
         state = self._extractState
-        nodeLookup = state['nodeLookup']
-        if obj not in nodeLookup:
-            nodeLookup[obj] = {}
-        if parent and ('parent' not in nodeLookup[obj]):
-            nodeLookup[obj]['parent'] = parent
-        if state['verbose'] and parent.__class__.__name__ == 'Part':
+        if state['verbose'] and parentNode and parentNode['vertex']['type'] in ('Part', 'PartStaff'):
             state['partItemCnt'] = state.get('partItemCnt', 0) + 1
             self._progressReport(state['partItemCnt'], 0, state['partItemMax'], 0, 75)
-        self._addNode(obj)
+        objNode = self._addNode(obj, parentNode)
+        if objNode == self.HIDEFROMDATABASE:
+            return
         if hasattr(obj, 'classes') and 'Spanner' in obj.classes:
             return
         if obj.__class__.__name__ == 'Moment':
@@ -876,43 +974,44 @@ class Database(object):
         except TypeError:
             return
         for item in itemList:
-            self._extractNodes(item, obj)
+            if item == obj:
+                continue
+            self._extractNodes(item, objNode)
 
-    def _addNode(self, node):
+    def _addNode(self, node, parentData=None, vertex=None):
         kind = node.__class__.__name__
-        nodeLookup = self._extractState['nodeLookup']
-        try:
-            vertex = nodeLookup[node]['vertex']
-        except KeyError:
-            vertex = nodeLookup[node]['vertex'] = {}
+        if not vertex:
+            vertex = {}
         vertex['type'] = kind
         if hasattr(node, 'offset'):
             vertex['offset'] = node.offset
-        if self._runCallbacks(node) != None:
-            return
-        self.nodes.append(weakref.ref(node))
-        if 'parent' in nodeLookup[node]:
-            parent = nodeLookup[node]['parent']
-            parentvertex = nodeLookup[parent]['vertex']
-            relation = vertex['type'] + 'In' + parentvertex['type']
-            self._addEdge(node, relation, parent)
+        if self._runCallbacks(node, vertex, parentData) == self.HIDEFROMDATABASE:
+            return self.HIDEFROMDATABASE
+        parentHash = None
+        if parentData:
+            parentHash = parentData['hash']
+        nodeData = self.nodeFarm.addNode(node, parentHash, vertex)
+        self.maxNodes = self.maxNodes + 1
+        if parentData:
+            relation = nodeData['vertex']['type'] + 'In' + parentData['vertex']['type']
+            self._addEdge(node, relation, parentData['hash'])
         if 'Spanner' in getattr(node, '_classes', []) or kind == 'Moment':
             return
-        self._extractObject(node)
+        self._extractObject(node, nodeData)
+        return nodeData
 
     def _addEdge(self, start, relationship, end, propertyNode=None):
         if isinstance(propertyNode, dict):
             properties = propertyNode
         elif isinstance(propertyNode, base.Music21Object): # in case of Spanners
-            self._extractObject(propertyNode)
-            properties = self._extractState['nodeLookup'][propertyNode]['vertex']
+            propertyData = self._extractObject(propertyNode)
+            properties = propertyData['vertex']
         else:
             properties = {}
-        properties['type'] = relationship
-        edge = [ start, relationship, end, properties ]
-        self.edges.append(edge)
+        self.nodeFarm.addEdge(start, relationship, end, properties)
+        self.maxEdges = self.maxEdges + 1
            
-    def _runCallbacks(self, node):
+    def _runCallbacks(self, node, nodeData, parentData):
         keys = self._callbacks.keys()
         if hasattr(node, 'classes'):
             kinds = [x for x in node.classes if x in keys]
@@ -926,15 +1025,21 @@ class Database(object):
             if kind not in self._callbacks:
                 continue
             for callback in self._callbacks[kind]:
-                rc = callback(self, node)
+                rc = callback(self, node, nodeData, parentData)
                 if rc != None:
                     return rc
 
-    def _extractObject(self, obj):
-        if obj.__class__.__name__ == 'Moment':
+    # get data from object; extract subnodes if necessary
+    def _extractObject(self, obj, objData=None, parentNode=None):
+        if isinstance(obj, Moment):
             return
+        if not objData:
+            parentHash = None
+            if parentNode:
+                parentHash = parentNode['hash']
+            objData = self.nodeFarm.addNode(obj, parentHash)
         objectDict = obj.__dict__
-        vertex = self._extractState['nodeLookup'][obj]['vertex']
+        vertex = objData['vertex']
         for key, val in objectDict.iteritems():
             if key in self._skipProperties:
                 continue
@@ -943,7 +1048,7 @@ class Database(object):
             elif isinstance(val, list):
                 for item in val:
                     if hasattr(item, '__dict__'):
-                        self._extractNodes(item, obj)
+                        self._extractNodes(item, objData)
                 continue
             elif isinstance(val, dict):
                 for key, text in val.iteritems():
@@ -952,7 +1057,7 @@ class Database(object):
             elif isinstance(val, music21.musicxml.base.MusicXMLElement):
                 continue
             elif hasattr(val, '__dict__'):
-                self._extractNodes(val, obj)
+                self._extractNodes(val, objData)
                 continue
             if key == 'type':
                 key = 'm21_' + key
@@ -961,6 +1066,8 @@ class Database(object):
             if not isinstance(val, (int, float, long)):
                 val = unicode(val)
             vertex[key] = val
+        self.nodeFarm.updateNode(objData, 'vertex', vertex)
+        return objData
     
     def _writeNodesToDatabase(self):
         '''
@@ -973,24 +1080,24 @@ class Database(object):
         if verbose:
             self._timeUpdate()
             sys.stderr.write('Writing nodes to database...........')
-            maxNodes = len(self.nodes)
             cnt = 0
         idx = 0
-        nodeLookup = self._extractState['nodeLookup']
-        while idx < len(self.nodes):
-            subset = self.nodes[idx:idx+batchSize]
+        while True:
+            subset = self.nodeFarm.getNodeBatch(idx, batchSize)
             batchLen = len(subset)
-            vertices = [nodeLookup[x()]['vertex'] for x in subset]
+            if batchLen == 0:
+                break
+            vertices = [x['vertex'] for x in subset]
             results = _serverCall(self.graph_db.create, *vertices)
             # Store a nodeRef reference for each music21 object 
             # with the address of its corresponding Neo4j node.
             for i in range(batchLen):
-                nodeLookup[subset[i]()]['nodeRef'] = results[i]
+                self.nodeRefs[subset[i]['hash']] = results[i]
             self._extractState['nodeCnt'] += batchLen
             if verbose:
                 cnt += batchLen
-                self._progressReport(cnt, 0, maxNodes, 75, 85)
-            idx += batchSize
+                self._progressReport(cnt, 0, self.maxNodes, 75, 85)
+            idx += batchLen
         
     def _writeEdgesToDatabase(self, score):
         '''
@@ -999,28 +1106,28 @@ class Database(object):
         '''
         batchSize = 100
         verbose = self._extractState['verbose']
-        nodeLookup = self._extractState['nodeLookup']
-        edgeRefs = []
-        for edge in self.edges:
-            ref1 = nodeLookup[edge[0]]['nodeRef']
-            ref2 = nodeLookup[edge[2]]['nodeRef']
-            edgeRef = [ ref1, edge[1], ref2 ]
-            # Add a property dictionary, if present.
-            if len(edge) > 3:
-                edgeRef.append(edge[3])
-            edgeRefs.append(edgeRef)
         if verbose:
             self._timeUpdate()
             sys.stderr.write('Writing relationships to database...')
-            maxEdges = len(edgeRefs)
         idx = 0
-        while idx < len(edgeRefs):
-            subset = edgeRefs[idx:idx+batchSize]
+        while True:
+            subset = self.nodeFarm.getEdgeBatch(idx, batchSize)
             batchLen = len(subset)
-            _serverCall(self.graph_db.create, *subset)
+            if batchLen == 0:
+                break
+            edgeRefs = []
+            for edge in subset:
+                ref1 = self.nodeRefs[edge['startNodeHash']]
+                ref2 = self.nodeRefs[edge['endNodeHash']]
+                edgeRef = [ref1, edge['relationship'], ref2]
+                print edgeRef
+                if edge['properties']:
+                    edgeRef.append(edge['properties'])
+                edgeRefs.append(tuple(edgeRef))
+            _serverCall(self.graph_db.create, *edgeRefs)
             self._extractState['relationCnt'] += batchLen
             if verbose:
-                self._progressReport(self._extractState['relationCnt'], 0, maxEdges, 85, 100)
+                self._progressReport(self._extractState['relationCnt'], 0, self.maxEdges, 85, 100)
             idx += batchSize
         if verbose:
             self._timeUpdate()
