@@ -114,8 +114,8 @@ class GeneratePreviews(multiprocessing.Process):
 
     def run(self, uri='http://localhost:7474/db/data/', **kwargs):
         # stupid hack to get py2neo to play nice with multiprocessing
-        import py2neo.rest
-        py2neo.rest._thread_local = threading.local()
+        py2neo.packages.httpstream.http.ConnectionPool._puddles = {}
+        #1.4: py2neo.rest._thread_local = threading.local()
         #
         db = music21.musicNet.Database()
         while True:
@@ -163,7 +163,8 @@ m = multiprocessing.Manager()
 inQueue = m.Queue()
 outQueue = m.Queue()
 previewWorkers = []
-for i in range(multiprocessing.cpu_count()):
+workerCount = multiprocessing.cpu_count()
+for i in range(workerCount):
     worker = GeneratePreviews(inQueue, outQueue)
     worker.daemon = True
     previewWorkers.append(worker)
@@ -193,7 +194,7 @@ def listScores():
         { movementName: name_of_score_file, _names: [ contributor, ... ], index: original_path_of_score_file }
         ...
     
-    We can test the functionallity of the app without actually starting it by using the :class:`webtest`
+    We can test the functionality of the app without actually starting it by using the :class:`webtest`
     framework:
     
     >>> from webtest import TestApp
@@ -276,6 +277,7 @@ def listNodeProperties():
     '''
     rows = app.db.listNodeProperties()
     for row in rows:
+        #print row ###
         yield json.dumps(row) + '\n'
 
 @app.get('/listnodepropertyvalues')
@@ -656,7 +658,9 @@ def results():
         nonobjects_meta = []
         for i in range(len(row)):
             item = row[i]
-            if isinstance(item, py2neo.rest.Resource):
+            #1.4: superclass = py2neo.rest.Resource
+            superclass = py2neo.neo4j.Resource
+            if isinstance(item, superclass):
                 objects.append(item)
                 objects_meta.append(metadata[i])
             elif not item is None:

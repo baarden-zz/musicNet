@@ -59,6 +59,11 @@ just move to the database directory and enter::
 
     $ bin/neo4j start
     
+After importing one or more files the relationship automatic index must still be manually
+created with this command::
+
+    $ bin/neo4j-shell -c 'index --create relationship_auto_index -t Relationship'
+    
 Contents
 ------------- 
 '''
@@ -88,7 +93,6 @@ import json
 import sqlite3
 import py2neo
 import py2neo.neo4j
-#import py2neo.rest
 import music21
 from music21 import *
 
@@ -186,11 +190,26 @@ def _signedModulo(val, mod):
         val -= mod * sign
     return val
 
+def _cypherQuery(db, queryText, params=None):
+    try:
+        #version 1.6
+        query = py2neo.neo4j.CypherQuery(db, queryText)
+        if params:
+            results = query.execute(**params) 
+        else:
+            results = query.execute()             
+        return results.data, results.columns
+    except AttributeError:
+        #version 1.4
+        results, metadata = py2neo.cypher.execute(db, queryText, params)
+        return results, metadata.columns
+
 def _getPy2neoMetadata(node):
     ''' Returns the hidden metadata of a py2neo object, 
     the location of which can change depending on the version of Neo4j.
     '''
-    return node._Resource__metadata
+    #1.4: return node._Resource__metadata['data'] # 1.4
+    return node.__dict__['_properties']
 
 def _convertFromString(val):
     if not isinstance(val, (str, unicode)):
@@ -240,8 +259,8 @@ class NodeFarm():
     
     def __init__(self):
         sqlite3.register_converter("JSON", json.loads)
-        self.dbFile = './musicnet_import_%d.db' % os.getpid()
-        self.sqldb = sqlite3.connect(self.dbFile, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+        #self.dbFile = './musicnet_import_%d.db' % os.getpid()
+        self.sqldb = sqlite3.connect('', detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
         self.sqldb.row_factory = sqlite3.Row
         c = self.sqldb.cursor()
         c.execute('DROP TABLE IF EXISTS nodeLookup;')
@@ -275,13 +294,15 @@ class NodeFarm():
             parentHash = hash(parent)
         if not vertex:
             vertex = {}
-        vertex['type'] = obj.__class__.__name__
+        if not 'type' in vertex:
+            vertex['type'] = obj.__class__.__name__
         vertexJSON = json.dumps(vertex)
         values = { 'hash': hash(obj),
                    'parentHash': parentHash,
                    'vertex': vertexJSON }
         sql = 'INSERT INTO nodeLookup (hash, parentHash, vertex) VALUES (:hash, :parentHash, :vertex); '
         self.writeBuffer.append( (sql, values) )
+        # return a copy of the node data with a real vertex
         valuesCopy = values.copy()
         valuesCopy['vertex'] = vertex
         return valuesCopy
@@ -523,6 +544,7 @@ class Database(object):
         self.nodeProperties = []
         self.nodePropertyValues = []
         q = Query(self)
+        q.limitReturnToWhere = False
         for nodeType in self.nTypes:
             q.setStartNode(nodeType=nodeType)
             results, meta = q.results(limit=10000)
@@ -583,19 +605,19 @@ class Database(object):
         rTypes = set()
         relateTypes = []
         while not relateTypes:
-            query = py2neo.neo4j.CypherQuery(self.graph_db, 'START r=relationship(*) RETURN DISTINCT TYPE(r);')
-            relateTypes = query.execute()
+            queryText = 'START r=relationship(*) RETURN DISTINCT TYPE(r);'
+            relateTypes, metadata = _cypherQuery(self.graph_db, queryText)
         for relateType in relateTypes:
             q = Query(self)
-            r = q.setStartRelationship(relationType=relateType[0])
+            r = q.setStartRelationship(relationType=str(relateType[0]))
             q.addReturns(r.start.type, r.end.type)
             q.limitReturnToWhere = True;
             results, meta = q.results(limit=100)
             for n1, n2 in results:
-                rTypes.add( (n1, relateType, n2) )
+                rTypes.add( (n1, relateType[0], n2) )
                 self.nTypes.add(n1)
                 self.nTypes.add(n2)
-        for start, r, end  in rTypes:
+        for start, r, end in rTypes:
             self.rTypes.append( { 'start': start, 'type': r, 'end': end } )
         return self.rTypes
     
@@ -1008,6 +1030,7 @@ class Database(object):
             properties = propertyData['vertex']
         else:
             properties = {}
+        properties['type'] = relationship
         self.nodeFarm.addEdge(start, relationship, end, properties)
         self.maxEdges = self.maxEdges + 1
            
@@ -1091,13 +1114,13 @@ class Database(object):
             results = _serverCall(self.graph_db.create, *vertices)
             # Store a nodeRef reference for each music21 object 
             # with the address of its corresponding Neo4j node.
-            for i in range(batchLen):
+            for i in range(len(results)):
                 self.nodeRefs[subset[i]['hash']] = results[i]
-            self._extractState['nodeCnt'] += batchLen
+            self._extractState['nodeCnt'] += len(results)
             if verbose:
-                cnt += batchLen
+                cnt += len(results)
                 self._progressReport(cnt, 0, self.maxNodes, 75, 85)
-            idx += batchLen
+            idx += len(results)
         
     def _writeEdgesToDatabase(self, score):
         '''
@@ -1120,7 +1143,6 @@ class Database(object):
                 ref1 = self.nodeRefs[edge['startNodeHash']]
                 ref2 = self.nodeRefs[edge['endNodeHash']]
                 edgeRef = [ref1, edge['relationship'], ref2]
-                print edgeRef
                 if edge['properties']:
                     edgeRef.append(edge['properties'])
                 edgeRefs.append(tuple(edgeRef))
@@ -1260,16 +1282,15 @@ class Query(object):
         >>> print q.results()
         ([[Node('http://localhost:7474/db/data/node/...')]], [u'Score1'])
         '''
-        import py2neo.cypher as cypher
+        #import py2neo.cypher as cypher
 
         if not pattern:
             pattern = self._assemblePattern()
-        results, metadata = _serverCall(cypher.execute, self.db.graph_db, pattern, 
-                                        {'maxResults': limit, 'minRow': minRow})
-        metadata = metadata.columns
-        _fix535(results, metadata) # Remove when issue 535 is fixed (introduced around Neo4j 1.8.1)
-        return results, metadata
-    
+        params = { 'minRow': minRow, 'maxResults': limit }
+        results, columns = _cypherQuery(self.db.graph_db, pattern, params)
+        #_fix535(results, metadata) # Remove when issue 535 is fixed (introduced around Neo4j 1.8.1)
+        return results, columns
+
     def getResultProperties(self, result):
         '''Takes a list of :class:`py2neo.neo4j.Node` and
         :class:`py2neo.neo4j.Relationship` objects (the default result format
@@ -1483,7 +1504,7 @@ class Query(object):
         "queryName" attribute that contains the query column name.
         '''
         self.nodeLookup = {}
-        result = [r for r in resultList if isinstance(r, py2neo.neo4j.Node) and _getPy2neoMetadata(r)['data']['type'] == 'Note']
+        result = [r for r in resultList if isinstance(r, py2neo.neo4j.Node) and _getPy2neoMetadata(r)['type'] == 'Note']
         # add hierarchical nodes and result properties if that hasn't happened already
         self._addHierarchicalNodes(result, metadata, True)
         result = self.getResultProperties(result)
@@ -1708,12 +1729,12 @@ class Query(object):
 #            props = [x for x in props if isinstance(x, music21.musicNet.Property) and x.name != 'ID']
         props = [str(x) for x in set(props)]
         distinctStr = ''
-        if (distinct):
-            distinctStr = 'distinct '
+        #if (distinct):
+        #    distinctStr = 'distinct '
         returnStr = 'return ' + distinctStr + ', '.join(props) + '\n'
         limitStr = 'limit {maxResults}\n'
         skipStr = 'skip {minRow}\n'
-        self.pattern = startStr + matchStr + whereStr + returnStr + self.order + skipStr + limitStr
+        self.pattern = startStr + matchStr + whereStr + returnStr + self.order + skipStr + limitStr + ';'
         return self.pattern
 
     def _addHierarchicalNodes(self, results, metadata, buildFullScore):
@@ -1740,13 +1761,13 @@ class Query(object):
             q.setStartNode(n)
             subresults, meta = q.results()
             self._filterNodesAndRelationships(subresults[0], nodes, relations)
-        measures = [x for x in nodes.values() if _getPy2neoMetadata(x)['data']['type'] == 'Measure']
-        measureNumbers = [_getPy2neoMetadata(x)['data']['number'] for x in measures]
+        measures = [x for x in nodes.values() if _getPy2neoMetadata(x)['type'] == 'Measure']
+        measureNumbers = [_getPy2neoMetadata(x)['number'] for x in measures]
         measureRange = range(min(measureNumbers), max(measureNumbers) + 1)
         
         # Fill in measures in other parts and other structural nodes
-        score = [x for x in nodes.values() if _getPy2neoMetadata(x)['data']['type'] == 'Score'][0]
-        parts = [x for x in nodes.values() if _getPy2neoMetadata(x)['data']['type'] == 'Part']
+        score = [x for x in nodes.values() if _getPy2neoMetadata(x)['type'] == 'Score'][0]
+        parts = [x for x in nodes.values() if _getPy2neoMetadata(x)['type'] == 'Part']
         q = Query(self.db)
         s = Node(q, nodeId=_id(score))
         q.setStartNode(s)
@@ -1766,7 +1787,7 @@ class Query(object):
         
         if (buildFullScore):
             # Fill in the other notes in the measures.
-            measures = [x for x in nodes.values() if _getPy2neoMetadata(x)['data']['type'] == 'Measure']
+            measures = [x for x in nodes.values() if _getPy2neoMetadata(x)['type'] == 'Measure']
             for m in measures:
                 self._addChildren(m, 'NoteInMeasure', nodes, relations)
                 self._addChildren(m, 'RestInMeasure', nodes, relations)
@@ -1774,7 +1795,7 @@ class Query(object):
             # Add one more layer of objects below the existing ones.
             rTypes = self.db.listRelationshipTypes()
             for node in nodes.values():
-                nType = _getPy2neoMetadata(node)['data']['type']
+                nType = _getPy2neoMetadata(node)['type']
                 inNodeRTypes = [x for x in rTypes if x['end'] == nType]
                 for r in inNodeRTypes:
                     rType = r['type']
