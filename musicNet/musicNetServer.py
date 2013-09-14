@@ -40,7 +40,6 @@ import json
 import tempfile
 import multiprocessing
 import Queue
-import threading
 import bottle
 import music21
 import music21.musicNet

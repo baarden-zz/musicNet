@@ -259,24 +259,15 @@ class NodeFarm():
     
     def __init__(self):
         sqlite3.register_converter("JSON", json.loads)
-        #self.dbFile = './musicnet_import_%d.db' % os.getpid()
         self.sqldb = sqlite3.connect('', detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
         self.sqldb.row_factory = sqlite3.Row
         c = self.sqldb.cursor()
-        c.execute('DROP TABLE IF EXISTS nodeLookup;')
         c.execute('CREATE TABLE nodeLookup (hash INTEGER, parentHash INTEGER, vertex JSON, nodeRef INTEGER);')
-        c.execute('DROP TABLE IF EXISTS edges;')
         c.execute('CREATE TABLE edges (startNodeHash INTEGER, relationship TEXT, endNodeHash INTEGER, properties JSON);')
         c.execute('CREATE INDEX nodeLookup_hash_IDX on nodeLookup (hash);')
         self.sqldb.commit()
         self.writeBuffer = []
         
-    def __del__(self):
-        #if hasattr(self, 'dbFile'):
-        self.sqldb.close()
-        while os.path.exists(self.dbFile):
-            os.remove(self.dbFile)
-
     def flushBuffer(self):
         if len(self.writeBuffer) == 0:
             return
@@ -351,7 +342,7 @@ class NodeFarm():
     def getNodeBatch(self, startIdx, limit=100):
         self.flushBuffer()
         c = self.sqldb.cursor()
-        c.execute('SELECT * FROM nodeLookup WHERE ROWID > :startIdx LIMIT :limit;', locals())
+        c.execute('SELECT * FROM nodeLookup WHERE ROWID >= :startIdx LIMIT :limit;', locals())
         results = []
         while True:
             result = c.fetchone()
@@ -363,7 +354,7 @@ class NodeFarm():
     def getEdgeBatch(self, startIdx, limit=100):
         self.flushBuffer()
         c = self.sqldb.cursor()
-        c.execute('SELECT * FROM edges WHERE ROWID > :startIdx LIMIT :limit;', locals())
+        c.execute('SELECT * FROM edges WHERE ROWID >= :startIdx LIMIT :limit;', locals())
         return c.fetchall()    
 
 #-------------------------------------------------------------------------------
@@ -400,7 +391,6 @@ class Database(object):
         self._extractState = {}
         self._defaultCallbacks()
         self._m21SuperclassLookup = self._inspectMusic21ExpressionsArticulations()
-        self.nodeFarm = NodeFarm()
         self._skipProperties = ('_activeSite', 'id', '_classes', 'groups', 'sites',
                                '_derivation', '_overriddenLily', '_definedContexts', '_activeSiteId', 
                                '_idLastDeepCopyOf', '_mutable', '_elements', '_cache', 'isFlat', 
@@ -460,6 +450,7 @@ class Database(object):
         self.nodeRefs = {}
         self.maxNodes = 0
         self.maxEdges = 0
+        self.nodeFarm = NodeFarm()
         self._extractState = { 'verbose': verbose,
                               'nodeCnt': 0,
                               'relationCnt': 0,
@@ -707,6 +698,7 @@ class Database(object):
                     number = number + 1
                     partVertex = { 'number': number }
                     self.nodeFarm.addNode(obj, score, partVertex)
+                    self.maxNodes = self.maxNodes + 1
         self.addPropertyCallback('Score', addNumbersToParts)
         
         # Contributor
@@ -971,7 +963,7 @@ class Database(object):
         progress = rangeOut * (state - minIn) / rangeIn + minOut
         progress = 5 * round(progress / 5)
         if progress >= lastOut + 5:
-            increment = int(30.0 * (5.0 / rangeOut))
+            increment = int(60.0 * (5.0 / rangeOut))
             sys.stderr.write('=' * increment)
             self.lastProgress = progress
     
@@ -983,7 +975,7 @@ class Database(object):
         state = self._extractState
         if state['verbose'] and parentNode and parentNode['vertex']['type'] in ('Part', 'PartStaff'):
             state['partItemCnt'] = state.get('partItemCnt', 0) + 1
-            self._progressReport(state['partItemCnt'], 0, state['partItemMax'], 0, 75)
+            self._progressReport(state['partItemCnt'], 0, state['partItemMax'], 0, 5)
         objNode = self._addNode(obj, parentNode)
         if objNode == self.HIDEFROMDATABASE:
             return
@@ -1061,6 +1053,7 @@ class Database(object):
             if parentNode:
                 parentHash = parentNode['hash']
             objData = self.nodeFarm.addNode(obj, parentHash)
+            self.maxNodes = self.maxNodes + 1
         objectDict = obj.__dict__
         vertex = objData['vertex']
         for key, val in objectDict.iteritems():
@@ -1117,10 +1110,10 @@ class Database(object):
             for i in range(len(results)):
                 self.nodeRefs[subset[i]['hash']] = results[i]
             self._extractState['nodeCnt'] += len(results)
+            idx += len(results)
             if verbose:
                 cnt += len(results)
-                self._progressReport(cnt, 0, self.maxNodes, 75, 85)
-            idx += len(results)
+                self._progressReport(cnt, 0, self.maxNodes, 5, 25)
         
     def _writeEdgesToDatabase(self, score):
         '''
@@ -1147,10 +1140,10 @@ class Database(object):
                     edgeRef.append(edge['properties'])
                 edgeRefs.append(tuple(edgeRef))
             _serverCall(self.graph_db.create, *edgeRefs)
-            self._extractState['relationCnt'] += batchLen
-            if verbose:
-                self._progressReport(self._extractState['relationCnt'], 0, self.maxEdges, 85, 100)
+            #self._extractState['relationCnt'] += batchLen
             idx += batchSize
+            if verbose:
+                self._progressReport(idx, 0, self.maxEdges, 25, 100)
         if verbose:
             self._timeUpdate()
 
