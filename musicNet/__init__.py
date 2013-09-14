@@ -244,17 +244,6 @@ def _serverCall(func, *args):
 #            continue
         return r    
 
-def _fix535(results, metadata):
-    orderColumn = -1
-    for i in range(len(metadata)):
-        if (metadata[i].find('INTERNAL_SORT') > -1):
-            orderColumn = i
-            metadata.pop(i)
-            break
-    if (orderColumn > -1):
-        for i in range(len(results)):
-            results[i].pop(orderColumn)
-
 class NodeFarm():
     
     def __init__(self):
@@ -381,10 +370,9 @@ class Database(object):
     HIDEFROMDATABASE = 1
 
     def __init__(self, uri='http://localhost:7474/db/data/', **kwargs):
-        try:
-            self.graph_db = py2neo.neo4j.GraphDatabaseService(uri, **kwargs)
-        except py2neo.rest.SocketError:
-            sys.exit('Unable to connect to database.\n')
+        self.uri = uri
+        self.dbargs = kwargs
+        self._refreshGraphDB()
         self._db_kwargs = kwargs
         self._db_uri = uri
         self._callbacks = {}
@@ -398,6 +386,13 @@ class Database(object):
                                'flattenedRepresentationOf', '_reprHead', 'idLocal', 'autoSort',
                                'inherited', '_fullyQualifiedClasses', 'filePath', 'fileFormat', 
                                'fileNumber', 'spannedElements') 
+
+    def _refreshGraphDB(self):
+        try:
+            self.graph_db = py2neo.neo4j.GraphDatabaseService(self.uri, **self.dbargs)
+        except py2neo.packages.httpstream.http.SocketError:
+        #1.4: except py2neo.rest.SocketError:
+            sys.exit('Unable to connect to database.\n')
 
     def wipeDatabase(self):
         '''Removes all relationships and nodes from the database.
@@ -931,11 +926,12 @@ class Database(object):
         self.addPropertyCallback('TimeSignature', getBarDuration)
         
         # Omitted objects
-        # KeySignature, MiscTandam
+        # KeySignature, MiscTandam, RomanNumeral
         def skipThisObject(db, obj, vertex, parentNode):
             return HIDEFROMDATABASE
         self.addPropertyCallback('KeySignature', skipThisObject)
         self.addPropertyCallback('MiscTandam', skipThisObject)
+        self.addPropertyCallback('RTMeasure', skipThisObject)
 
     def _inspectMusic21ExpressionsArticulations(self):
         import inspect
@@ -1097,7 +1093,8 @@ class Database(object):
             self._timeUpdate()
             sys.stderr.write('Writing nodes to database...........')
             cnt = 0
-        idx = 0
+        idx = 1
+        self._refreshGraphDB()
         while True:
             subset = self.nodeFarm.getNodeBatch(idx, batchSize)
             batchLen = len(subset)
@@ -1112,8 +1109,7 @@ class Database(object):
             self._extractState['nodeCnt'] += len(results)
             idx += len(results)
             if verbose:
-                cnt += len(results)
-                self._progressReport(cnt, 0, self.maxNodes, 5, 25)
+                self._progressReport(idx, 0, self.maxNodes, 5, 25)
         
     def _writeEdgesToDatabase(self, score):
         '''
@@ -1125,7 +1121,7 @@ class Database(object):
         if verbose:
             self._timeUpdate()
             sys.stderr.write('Writing relationships to database...')
-        idx = 0
+        idx = 1
         while True:
             subset = self.nodeFarm.getEdgeBatch(idx, batchSize)
             batchLen = len(subset)
