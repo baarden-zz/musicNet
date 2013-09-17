@@ -35,145 +35,31 @@ Services
 '''
 
 import os
+import sys
 import time
 import json
+import pickle
 import tempfile
-import multiprocessing
-import Queue
-import bottle
 import music21
 import music21.musicNet
 import py2neo
+import redis
+import flask
 
 
-## {{{ http://code.activestate.com/recipes/577564/ (r2) 
-class Silence:
-
-    def __init__(self, stdout=os.devnull, stderr=os.devnull, mode='w'):
-        self.outfiles = stdout, stderr
-        self.combine = (stdout == stderr)
-        self.mode = mode
- 
-    def __enter__(self):
-        import sys
-        self.sys = sys
-        # save previous stdout/stderr
-        self.saved_streams = saved_streams = sys.__stdout__, sys.__stderr__
-        self.fds = fds = [s.fileno() for s in saved_streams]
-        self.saved_fds = map(os.dup, fds)
-        # flush any pending output
-        for s in saved_streams: s.flush()
- 
-        # open surrogate files
-        if self.combine: 
-            null_streams = [open(self.outfiles[0], self.mode, 0)] * 2
-            if self.outfiles[0] != os.devnull:
-                # disable buffering so output is merged immediately
-                sys.stdout, sys.stderr = map(os.fdopen, fds, ['w']*2, [0]*2)
-        else: null_streams = [open(f, self.mode, 0) for f in self.outfiles]
-        self.null_fds = null_fds = [s.fileno() for s in null_streams]
-        self.null_streams = null_streams
- 
-        # overwrite file objects and low-level file descriptors
-        map(os.dup2, null_fds, fds)
- 
-    def __exit__(self, *args):
-        sys = self.sys
-        # flush any pending output
-        for s in self.saved_streams: s.flush()
-        # restore original streams and file descriptors
-        map(os.dup2, self.saved_fds, self.fds)
-        sys.stdout, sys.stderr = self.saved_streams
-        # clean up
-        for s in self.null_streams: s.close()
-        return False
-## end of http://code.activestate.com/recipes/577564/ }}}
-
-
-class GeneratePreviews(multiprocessing.Process):
-    '''
-    .. doctest::
-       hide
-    >>> import multiprocessing
-    >>> inQueue = multiprocessing.JoinableQueue()
-    >>> outQueue = multiprocessing.JoinableQueue()
-    >>> from music21.musicNet.musicNetServer import *
-    >>> previewGen = GeneratePreviews(inQueue, outQueue)
-    >>> from music21 import *
-    >>> bwv84_5 = corpus.parse('bach/bwv84.5.mxl')
-    >>> previewGen.makePreview(bwv84_5)
-    'preview...png'
-    '''
-    
-    def __init__(self, inQueue, outQueue):
-        multiprocessing.Process.__init__(self)
-        self.daemon = True
-        self.inQueue = inQueue
-        self.outQueue = outQueue
-
-    def run(self, uri='http://localhost:7474/db/data/', **kwargs):
-        # stupid hack to get py2neo to play nice with multiprocessing
-        py2neo.packages.httpstream.http.ConnectionPool._puddles = {}
-        #1.4: py2neo.rest._thread_local = threading.local()
-        #
-        db = music21.musicNet.Database()
-        while True:
-            try:
-                scoreDict = self.inQueue.get_nowait()
-            except Queue.Empty:
-                time.sleep(0.25)
-                continue
-            q = music21.musicNet.Query(db)
-            score = q.music21Score(scoreDict['result'], scoreDict['metadata'])
-            path = self.makePreview(score)
-            imageDict = { 'index': scoreDict['index'], 'path': path, 'token': scoreDict['token'] }
-            self.inQueue.task_done()
-            self.outQueue.put(imageDict)
-    
-    def makePreview(self, score):
-        fh = tempfile.NamedTemporaryFile(prefix='preview', dir=tempfile.gettempdir(), delete=False)
-        filename = fh.name
-        fh.close()
-        # Create a minimal score with no header or footer
-        score.metadata = None
-        conv = music21.lily.translate.LilypondConverter()
-        conv.loadFromMusic21Object(score)
-        header = [x for x in conv.context.contents if isinstance(x, music21.lily.lilyObjects.LyLilypondHeader)][0]
-        header.lilypondHeaderBody = 'tagline = ""'
-        with Silence():
-            conv.runThroughLily(backend='eps -dresolution=200', format='png', fileName=filename)
-        from subprocess import call
-        filename += '.png'
-        call(['convert', '-trim', filename, filename])
-        return os.path.basename(filename)
-
-#-------------------------------------------------------------------------------
-# musicNetServer
-#-------------------------------------------------------------------------------
-
-bottle.debug(True)
-app = bottle.Bottle()
-app.catchall = False
+app = flask.Flask(__name__)
+app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 app.db = music21.musicNet.Database()
+app.redis = redis.StrictRedis(host='localhost', port=6379, db=0)
 app.tokens = {}
 app.images = {}
-
-m = multiprocessing.Manager()
-inQueue = m.Queue()
-outQueue = m.Queue()
-previewWorkers = []
-workerCount = multiprocessing.cpu_count()
-for i in range(workerCount):
-    worker = GeneratePreviews(inQueue, outQueue)
-    worker.daemon = True
-    previewWorkers.append(worker)
 
 '''
 listScores
 ----------
 '''
 
-@app.get('/listscores')
+@app.route('/listscores')
 def listScores():
     '''
     Server address::
@@ -204,9 +90,9 @@ def listScores():
     >>> sorted(json.loads(r.body).items())
     [(u'_names', [None]), (u'corpusFilepath', u'bach/bwv84.5.mxl'), (u'movementName', u'bwv84.5.mxl')]
     '''
-    query = bottle.request.query
-    start = int(query.start or 0)
-    limit = int(query.limit or 100)
+    query = flask.request.args
+    start = int(query.get('start', '0'))
+    limit = int(query.get('limit', '100'))
     rows = app.db.listScores(start, limit)
     for row in rows:
         yield json.dumps(row) + '\n'
@@ -215,7 +101,7 @@ def listScores():
 listNodeTypes
 -------------
 '''     
-@app.get('/listnodetypes')
+@app.route('/listnodetypes')
 def listNodeTypes():
     '''    
     Server address::
@@ -243,7 +129,7 @@ def listNodeTypes():
     types = list(app.db.listNodeTypes())
     return json.dumps(types) + '\n'
 
-@app.get('/listnodeproperties')
+@app.route('/listnodeproperties')
 def listNodeProperties():
     '''
     Server address::
@@ -279,7 +165,7 @@ def listNodeProperties():
         #print row ###
         yield json.dumps(row) + '\n'
 
-@app.get('/listnodepropertyvalues')
+@app.route('/listnodepropertyvalues')
 def listNodePropertyValues():
     '''
     Server address::
@@ -311,10 +197,12 @@ def listNodePropertyValues():
     [u'StaffGroup', u'offset', [0.0,]]
     '''
     rows = app.db.listNodePropertyValues()
-    for row in rows:
-        yield json.dumps(row) + '\n'
+    def generate():
+        for row in rows:
+            yield json.dumps(row) + '\n'        
+    return flask.Response(generate(), mimetype='application/json')
         
-@app.get('/listrelationshiptypes')
+@app.route('/listrelationshiptypes')
 def listRelationshipTypes():
     '''
     Server address::
@@ -345,10 +233,12 @@ def listRelationshipTypes():
     {u'start': u'Note', u'end': u'Measure', u'type': u'NoteInMeasure'}
     '''
     rows = app.db.listRelationshipTypes()
-    for row in rows:
-        yield json.dumps(row) + '\n'
+    def generate():
+        for row in rows:
+            yield json.dumps(row) + '\n'
+    return flask.Response(generate(), mimetype='application/json')
 
-@app.get('/listrelationshipproperties')
+@app.route('/listrelationshipproperties')
 def listRelationshipProperties():
     '''
     Server address::
@@ -379,10 +269,12 @@ def listRelationshipProperties():
     [(u'end', u'Measure'), (u'start', u'Note'), (u'type', u'NoteInMeasure')]
     '''
     rows = app.db.listRelationshipProperties()
-    for row in rows:
-        yield json.dumps(row) + '\n'
+    def generate():
+        for row in rows:
+            yield json.dumps(row) + '\n'
+    return flask.Response(generate(), mimetype='application/json')
 
-@app.get('/listrelationshippropertyvalues')
+@app.route('/listrelationshippropertyvalues')
 def listRelationshipPropertyValues():
     '''
     Server address::
@@ -414,15 +306,18 @@ def listRelationshipPropertyValues():
     [u'NoteToNoteByBeat', u'interval', [-12, -7, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 7, 12]]
     '''
     rows = app.db.listRelationshipPropertyValues()
-    for row in rows:
-        yield json.dumps(row) + '\n'
-        
-@app.get('/images/<filename:re:.*\.png>')
+    def generate():
+        for row in rows:
+            yield json.dumps(row) + '\n'
+    return flask.Response(generate(), mimetype='application/json')
+
+@app.route('/images/<filename>.png')
 def sendImage(filename):
     tempdir = tempfile.gettempdir()
-    return bottle.static_file(filename, root=tempdir, mimetype='image/png')
+    return flask.send_file(tempdir + '/' + filename + '.png', mimetype='image/png')
+    #return bottle.static_file(filename, root=tempdir, mimetype='image/png')
 
-@app.post('/submitquery')
+@app.route('/submitquery', methods=['POST'])
 def prepareQuery():
     '''
     Server address::
@@ -501,17 +396,17 @@ def prepareQuery():
     >>> json.loads(r.body)
     {u'token': ...}
     '''
-    req = bottle.request.json
+    req = flask.request.get_json()
     q = music21.musicNet.Query(app.db)
-    nodes = {}
     scoreNode = None
+    nodes = {}
     relations = {}
     properties = {}
-    notes = []
     measures = {}
     parts = {}
     instruments = {}
     score = {}
+    notes = []
     columns = []
     if not req.get('nodes', False):
         return { 'error': 'query has no nodes' }
@@ -559,8 +454,6 @@ def prepareQuery():
         returns = [properties[r['property']] for r in req['returns']]
         columns.extend(returns);
         q.addReturns(*returns)
-    #else:
-    #    columns.extend(properties.values())
     for n in notes:
         if n not in measures.keys():
             m = q.addNode('Measure', 'measure_' + n.name)
@@ -582,13 +475,14 @@ def prepareQuery():
         r = q.addRelationship(relationType='PartInScore', start=p, end=scoreNode, name=p.name+'In'+scoreNode.name)
     previews = req.get('makePreviews', False)
     pattern = q._assemblePattern(distinct=True)
-    ipAddr = bottle.request.remote_addr or "None"
+    ipAddr = flask.request.remote_addr or "None"
     token = hash(ipAddr + pattern)
     app.tokens[token] = [pattern, columns, previews, time.time()]
     expireTokens()
-    return { 'token': token }
+    result = { 'token': token }
+    return flask.jsonify(**result)
     
-@app.get('/getresults')
+@app.route('/getresults')
 def results():
     '''
     Server address::
@@ -633,10 +527,13 @@ def results():
     >>> sorted(json.loads(r.body.splitlines()[0]).items())
     [(u'data', [u'n1']), (u'type', u'metadata')]
     '''
-    args = bottle.request.query
-    token = int(args.token)
-    minRow = int(args.row or 0)
-    limit = int(args.limit or 10)
+    args = flask.request.args
+    token = int(args.get('token', ''))
+    minRow = int(args.get('row', '0'))
+    limit = int(args.get('limit', '10'))
+    return flask.Response(generate_results(token, minRow, limit), mimetype='application/json')
+
+def generate_results(token, minRow, limit):
     if token not in app.tokens:
         item = { 'error': 'That token is invalid or has expired.' }
         yield json.dumps(item) + '\n'
@@ -682,7 +579,9 @@ def results():
                 if objects_meta[i] in columns:
                     output_objects.append(result[i][0])
                     output_meta.append(objects_meta[i])
-            inQueue.put({ 'index': queryIdx, 'result': output_objects, 'metadata': output_meta, 'token': token })
+            vals = { 'index': queryIdx, 'result': output_objects, 'metadata': output_meta, 'token': token }
+            pvals = pickle.dumps(vals)
+            app.redis.rpush('inQueue', pvals)
         if idx == 0:
             item = { 'type': 'metadata', 'data': meta_output }
             yield json.dumps(item) + '\n'
@@ -690,7 +589,7 @@ def results():
         yield json.dumps(item) + '\n'
     expireTokens()
 
-@app.get('/getimages')
+@app.route('/getimages')
 def getImage():
     '''
     Server address::
@@ -736,7 +635,10 @@ def getImage():
     >>> sorted(json.loads(r.body).items())                                      # doctest: +SKIP
     [(u'index', 0), (u'type', u'preview'), (u'url', u'/images/preview...png')]  # doctest: +SKIP
     '''
-    token = int(bottle.request.query.token)
+    token = int(flask.request.args.get('token', ''))
+    return flask.Response(generate_images(token), mimetype='application/json')
+
+def generate_images(token):
     if token not in app.tokens:
         item = { 'error': 'That token is invalid or has expired.' }
         yield json.dumps(item) + '\n'
@@ -746,16 +648,11 @@ def getImage():
         item = { 'error': 'makePreviews was not set in the query submission.' }
         yield json.dumps(item) + '\n'
         raise StopIteration
-    if bottle.request.query.block:
-        imageDict = outQueue.get()
-        outQueue.task_done()
-        addImage(imageDict)
     while True:
-        try:
-            imageDict = outQueue.get_nowait()
-        except Queue.Empty:
+        val = app.redis.lpop('outQueue')
+        if val == None:
             break
-        outQueue.task_done()
+        imageDict = pickle.loads(val)
         addImage(imageDict)
     images = app.images.pop(token, [])
     while images:
@@ -832,9 +729,8 @@ if __name__ == "__main__":
     print "Loading relationship property values..."
     app.db.listRelationshipPropertyValues()
     
-    for worker in previewWorkers:
-        worker.start()
-    bottle.run(app, host=options.address, port=8080) #reloader=True
+    print 'Running.'
+    app.run(host=options.address) #reloader=True
     
     
 # This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. 

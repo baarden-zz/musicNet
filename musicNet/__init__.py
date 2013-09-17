@@ -88,13 +88,22 @@ import sys
 import time
 import random
 import weakref
+#import threading
 import unittest, doctest
 import json
 import sqlite3
+import redis
+import rq
 import py2neo
 import py2neo.neo4j
 import music21
 from music21 import *
+
+import logging
+logging.basicConfig(filename='example.log',level=logging.DEBUG)
+
+rq_queue = rq.Queue(connection=redis.Redis())
+
 
 def _prepDoctests():
     '''This function is run before starting doctests. 
@@ -191,18 +200,33 @@ def _signedModulo(val, mod):
     return val
 
 def _cypherQuery(db, queryText, params=None):
+    job = rq_queue.enqueue(_threadedQuery, queryText, params)
+    interval = 0.01
+    while True:
+        time.sleep(interval)
+        result = job.result
+        if result:
+            return result
+        interval = interval + 0.1
+
+def _threadedQuery(queryText, params):
     try:
         #version 1.6
-        query = py2neo.neo4j.CypherQuery(db, queryText)
+        py2neo.packages.httpstream.http.ConnectionPool._puddles = {}
+        db = Database()
+        query = py2neo.neo4j.CypherQuery(db.graph_db, queryText)
         if params:
             results = query.execute(**params) 
         else:
             results = query.execute()             
         return results.data, results.columns
     except AttributeError:
+        pass
         #version 1.4
-        results, metadata = py2neo.cypher.execute(db, queryText, params)
-        return results, metadata.columns
+        #py2neo.rest._thread_local = threading.local()
+        #db = Database()
+        #results, metadata = py2neo.cypher.execute(db, queryText, params)
+        #return results, metadata.columns
 
 def _getPy2neoMetadata(node):
     ''' Returns the hidden metadata of a py2neo object, 
@@ -244,14 +268,28 @@ def _serverCall(func, *args):
 #            continue
         return r    
 
+def _fix535(results, metadata):
+    orderColumn = -1
+    for i in range(len(metadata)):
+        if (metadata[i].find('INTERNAL_SORT') > -1):
+            orderColumn = i
+            metadata.pop(i)
+            break
+    if (orderColumn > -1):
+        for i in range(len(results)):
+            results[i].pop(orderColumn)
+
 class NodeFarm():
     
     def __init__(self):
         sqlite3.register_converter("JSON", json.loads)
+        #self.dbFile = './musicnet_import_%d.db' % os.getpid()
         self.sqldb = sqlite3.connect('', detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
         self.sqldb.row_factory = sqlite3.Row
         c = self.sqldb.cursor()
+        #c.execute('DROP TABLE IF EXISTS nodeLookup;')
         c.execute('CREATE TABLE nodeLookup (hash INTEGER, parentHash INTEGER, vertex JSON, nodeRef INTEGER);')
+        #c.execute('DROP TABLE IF EXISTS edges;')
         c.execute('CREATE TABLE edges (startNodeHash INTEGER, relationship TEXT, endNodeHash INTEGER, properties JSON);')
         c.execute('CREATE INDEX nodeLookup_hash_IDX on nodeLookup (hash);')
         self.sqldb.commit()
@@ -689,9 +727,10 @@ class Database(object):
         def addNumbersToParts(db, score, scoreVertex, emptyNode):
             number = 0
             for obj in score:
-                if isinstance(obj, music21.stream.Part):
+                if isinstance(obj, (music21.stream.Part, music21.stream.PartStaff)):
                     number = number + 1
-                    partVertex = { 'number': number }
+                    partVertex = { 'number': number,
+                                   'type': 'Part' }
                     self.nodeFarm.addNode(obj, score, partVertex)
                     self.maxNodes = self.maxNodes + 1
         self.addPropertyCallback('Score', addNumbersToParts)
@@ -707,6 +746,7 @@ class Database(object):
             for key in ('clef', 'timeSignature', 'keySignatureSharps', 'keySignatureMode'):
                 db._extractState[key] = None
         self.addPropertyCallback('Part', resetExtractState)
+        self.addPropertyCallback('PartStaff', resetExtractState)
                 
         # Measure
         def addSignaturesAndClefs(db, measure, vertex, partNode):
@@ -932,6 +972,8 @@ class Database(object):
         self.addPropertyCallback('KeySignature', skipThisObject)
         self.addPropertyCallback('MiscTandam', skipThisObject)
         self.addPropertyCallback('RTMeasure', skipThisObject)
+        self.addPropertyCallback('RomanTextUnprocessedToken', skipThisObject)
+        self.addPropertyCallback('RTPhraseBoundary', skipThisObject)
 
     def _inspectMusic21ExpressionsArticulations(self):
         import inspect
@@ -992,7 +1034,8 @@ class Database(object):
         kind = node.__class__.__name__
         if not vertex:
             vertex = {}
-        vertex['type'] = kind
+        if 'type' not in vertex:
+            vertex['type'] = kind
         if hasattr(node, 'offset'):
             vertex['offset'] = node.offset
         if self._runCallbacks(node, vertex, parentData) == self.HIDEFROMDATABASE:
