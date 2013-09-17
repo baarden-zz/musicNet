@@ -480,6 +480,7 @@ def prepareQuery():
     app.tokens[token] = [pattern, columns, previews, time.time()]
     expireTokens()
     result = { 'token': token }
+    print 'result: ' + str(result)
     return flask.jsonify(**result)
     
 @app.route('/getresults')

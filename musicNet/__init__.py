@@ -629,7 +629,7 @@ class Database(object):
         rTypes = set()
         relateTypes = []
         while not relateTypes:
-            queryText = 'START r=relationship(*) RETURN DISTINCT TYPE(r);'
+            queryText = "START r=relationship(*) RETURN DISTINCT TYPE(r);"
             relateTypes, metadata = _cypherQuery(self.graph_db, queryText)
         for relateType in relateTypes:
             q = Query(self)
