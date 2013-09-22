@@ -97,10 +97,10 @@ import rq
 import py2neo
 import py2neo.neo4j
 import music21
-from music21 import *
+#from music21 import *
 
-import logging
-logging.basicConfig(filename='example.log',level=logging.DEBUG)
+#import logging
+#logging.basicConfig(filename='example.log',level=logging.DEBUG)
 
 rq_queue = rq.Queue(connection=redis.Redis())
 
@@ -218,8 +218,9 @@ def _threadedQuery(queryText, params):
         if params:
             results = query.execute(**params) 
         else:
-            results = query.execute()             
-        return results.data, results.columns
+            results = query.execute()
+        rows = [tuple(x) for x in results.data] 
+        return rows, results.columns
     except AttributeError:
         pass
         #version 1.4
@@ -629,7 +630,7 @@ class Database(object):
         rTypes = set()
         relateTypes = []
         while not relateTypes:
-            queryText = "START r=relationship(*) RETURN DISTINCT TYPE(r);"
+            queryText = 'START r=relationship(*) RETURN DISTINCT TYPE(r);'
             relateTypes, metadata = _cypherQuery(self.graph_db, queryText)
         for relateType in relateTypes:
             q = Query(self)
@@ -979,7 +980,7 @@ class Database(object):
         import inspect
         lookup = {}
         # search music21 modules:
-        for module in (expressions, articulations):
+        for module in (music21.expressions, music21.articulations):
             sName = module.__name__[8:].capitalize()
             classes = inspect.getmembers(module, inspect.isclass)
             for cName, ref in classes:
@@ -1729,7 +1730,7 @@ class Query(object):
         import inspect
         self.m21_classes = {}
         # inspect music21 modules:
-        for module in (expressions, articulations):
+        for module in (music21.expressions, music21.articulations):
             mName = module.__name__
             self.m21_classes[mName] = {}
             classes = inspect.getmembers(module, inspect.isclass)
@@ -2096,7 +2097,7 @@ class Filter(Entity):
     def __getattr__(self):
         raise AttributeError
 
-class Moment(base.Music21Object):
+class Moment(music21.base.Music21Object):
     '''This object is similar in purpose to a
     :class:`~music21.voiceLeading.VerticalSlice` in that it contains every
     :class:`~music21.note.Note` that occurs at a given offset in a
