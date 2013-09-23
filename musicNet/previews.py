@@ -30,6 +30,8 @@ class GeneratePreviews(multiprocessing.Process):
         multiprocessing.Process.__init__(self)
         self.daemon = True
         self.redis = redis.StrictRedis(host='localhost', port=6379, db=0)
+        while self.redis.lpop('inQueue'):
+            pass
 
     def run(self, uri='http://localhost:7474/db/data/', **kwargs):
         # hack to get py2neo to play nice with multiprocessing

@@ -16,7 +16,7 @@
 This is an app that provides a RESTful JSON interface to the music21.musicNet objects.
 Any client with the ability to send/receive JSON can use a remote
 server running this app to execute queries and return the results. It's dependent on
-the Python Bottle module. (Doctests are dependent on the webtest module.)
+the Python Flask, py2neo, and redis modules. (Doctests are dependent on the webtest module.)
 
 Services with a result containing multiple rows return each row as a separate JSONItem:
 rather than returning one JSON document containing an array, each line
@@ -27,8 +27,10 @@ clients should check for this possibility.
 Only query-related services are exposed by this interface. Actions that manipulate 
 the database can only be done on the server using the musicNet objects directly.
 
-The app is built with the Bottle framework and will start using its default options
-(localhost:8080).
+The app is built with the Flask framework and will start using its default options
+(localhost:5000). A Redis server is expected at its default location (localhost:6379).
+Redis is used to communicate with the separate multiprocessing workers that generate
+preview images.
 
 Services
 ========
@@ -46,12 +48,12 @@ import py2neo
 import redis
 import flask
 
-
 app = flask.Flask(__name__)
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 app.db = music21.musicNet.Database()
 app.redis = redis.StrictRedis(host='localhost', port=6379, db=0)
 app.tokens = {}
+app.rGens = {}
 app.images = {}
 
 '''
@@ -477,6 +479,9 @@ def prepareQuery():
     pattern = q._assemblePattern(distinct=True)
     ipAddr = flask.request.remote_addr or "None"
     token = hash(ipAddr + pattern)
+    rGen = music21.musicNet.Results(pattern)
+    rGen.start()
+    app.rGens[token] = rGen
     app.tokens[token] = [pattern, columns, previews, time.time()]
     expireTokens()
     result = { 'token': token }
@@ -535,16 +540,22 @@ def results():
     return flask.Response(generate_results(token, minRow, limit), mimetype='application/json')
 
 def generate_results(token, minRow, limit):
-    if token not in app.tokens:
+    try:
+        rGen = app.rGens[token]
+        pattern, columns, previews, timestamp = app.tokens[token]
+    except KeyError:
         item = { 'error': 'That token is invalid or has expired.' }
         yield json.dumps(item) + '\n'
         raise StopIteration
-    pattern, columns, previews, timestamp = app.tokens[token]
-    q = music21.musicNet.Query(app.db)
-    data, metadata = q.results(minRow, limit, pattern)
+    data = rGen.next(limit)
+    if not data:
+        raise StopIteration
+    metadata = data[0]._fields
+    data = [tuple(x) for x in data]
     rLookup = {}
     for i in range(len(metadata)):
         rLookup[metadata[i]] = i
+    q = music21.musicNet.Query(app.db)
     for idx in range(len(data)):
         queryIdx = idx + minRow
         # remove any None values from the output

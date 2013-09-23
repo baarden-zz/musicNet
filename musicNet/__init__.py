@@ -41,13 +41,15 @@ add cross-:class:`~music21.stream.Part` relationships to Notes in the database.
 Configuration
 -------------
 
-This module requires that the `py2neo <http://py2neo.org/>`_ Python module be installed,
-and that you have access to a `Neo4j <http://neo4j.org/>`_ database (version 1.8 or newer).
+This module requires that the `py2neo <http://py2neo.org/>`_ Python module be
+installed (version 1.6). You must have
+access to a `Neo4j <http://neo4j.org/>`_ database (version 1.8 or newer). 
 
-The database must be configured to use automatic indexing. (Well, technically it doesn't, 
-but it will make open-ended searches a lot faster.) This involves editing the
-`conf/neo4j.properties` file in the database folder. The following lines should be 
-uncommented (the leading hash mark should be deleted) and edited as shown::
+The neo4j database must be configured to use automatic indexing. (Well,
+technically it isn't required, but it will make open-ended searches a lot
+faster.) This involves editing the `conf/neo4j.properties` file in the database
+folder. The following lines should be uncommented (the leading hash mark should
+be deleted) and edited as shown::
 
     node_auto_indexing=true
     node_keys_indexable=type
@@ -68,41 +70,35 @@ Contents
 ------------- 
 '''
 
-#TO DO:
-#LONG TERM:
-#Implement a programmatic replacement for Query.addCypherFilter(),
+# TO DO:
+# LONG TERM:
+# Implement a programmatic replacement for Query.addCypherFilter(),
 #  maybe by overriding Python operators, a la SQLAlchemy?
-#Add inspect disk caching.
-#Optimize speed and memory profiles. Goldberg Variations, argggh!
+# Add inspect disk caching.
 
-#Suggestions for music21:
-#Change Measure.keySignature, .timeSignature, and .clef from None to weakRefs.
-#Add direct means of manipulating Lilypond headers (removing tagline, etc.)
+# Suggestions for music21:
+# Change Measure.keySignature, .timeSignature, and .clef from None to weakRefs.
+# Add direct means of manipulating Lilypond headers (removing tagline, etc.)
 
-#Suggestions for py2neo
-#Authorization on databases doesn't appear to work with .create().
-#Tornado __del__ errors on exit should be fixed!
+# Suggestions for py2neo
+# Authorization on databases doesn't appear to work with .create().
 
 import os
 import sys
 import time
 import random
 import weakref
-#import threading
+import threading
 import unittest, doctest
 import json
 import sqlite3
-import redis
-import rq
 import py2neo
 import py2neo.neo4j
 import music21
-#from music21 import *
+# from music21 import *
 
-#import logging
-#logging.basicConfig(filename='example.log',level=logging.DEBUG)
-
-rq_queue = rq.Queue(connection=redis.Redis())
+# import logging
+# logging.basicConfig(filename='example.log',level=logging.DEBUG)
 
 
 def _prepDoctests():
@@ -152,7 +148,7 @@ def addMomentsToScore(score, forceAdd=False):
         # drop any sustained notes that have passed
         while (releaseOffsets and releaseOffsets[0] <= offset):
             del releaseLookup[releaseOffsets[0]]
-            heapq.heappop(releaseOffsets) # always returns the lowest element
+            heapq.heappop(releaseOffsets)  # always returns the lowest element
         # add any current sustained notes to the moment
         for r in releaseOffsets:
             for n in releaseLookup[r]:
@@ -199,41 +195,51 @@ def _signedModulo(val, mod):
         val -= mod * sign
     return val
 
-def _cypherQuery(db, queryText, params=None):
-    job = rq_queue.enqueue(_threadedQuery, queryText, params)
-    interval = 0.01
-    while True:
-        time.sleep(interval)
-        result = job.result
-        if result:
-            return result
-        interval = interval + 0.1
-
-def _threadedQuery(queryText, params):
-    try:
-        #version 1.6
+class Results(threading.Thread):
+    
+    def __init__(self, queryText, params=None):
+        threading.Thread.__init__(self)
         py2neo.packages.httpstream.http.ConnectionPool._puddles = {}
+        self.queryText = queryText
+        self.params = params
+        self.results = []
+        
+    def run(self):
         db = Database()
-        query = py2neo.neo4j.CypherQuery(db.graph_db, queryText)
-        if params:
-            results = query.execute(**params) 
+        query = py2neo.neo4j.CypherQuery(db.graph_db, self.queryText)
+        if self.params:
+            p = self.params
+            self.stream = query.stream(**p) 
         else:
-            results = query.execute()
-        rows = [tuple(x) for x in results.data] 
-        return rows, results.columns
-    except AttributeError:
-        pass
-        #version 1.4
-        #py2neo.rest._thread_local = threading.local()
-        #db = Database()
-        #results, metadata = py2neo.cypher.execute(db, queryText, params)
-        #return results, metadata.columns
+            self.stream = query.stream()
+        for item in self.stream:
+            self.results.append(item)
+
+    def next(self, limit=10):
+        output = []
+        for _ in range(limit):
+            while not self.results:
+                if self.is_alive():
+                    time.sleep(0.1)
+                else:
+                    break
+            if self.results:
+                output.append(self.results.pop(0))
+            else:
+                break
+        return output
+    
+    def fetch_all(self):
+        while self.is_alive():
+            time.sleep(0.1)
+        return self.results
+    
 
 def _getPy2neoMetadata(node):
     ''' Returns the hidden metadata of a py2neo object, 
     the location of which can change depending on the version of Neo4j.
     '''
-    #1.4: return node._Resource__metadata['data'] # 1.4
+    # 1.4: return node._Resource__metadata['data'] # 1.4
     return node.__dict__['_properties']
 
 def _convertFromString(val):
@@ -258,7 +264,7 @@ def _convertFromString(val):
 
 # return the ID of a py2neo object
 def _id(item):
-    return item._id #__dict__['_id']
+    return item._id  # __dict__['_id']
 
 def _serverCall(func, *args):
     while True:
@@ -284,13 +290,13 @@ class NodeFarm():
     
     def __init__(self):
         sqlite3.register_converter("JSON", json.loads)
-        #self.dbFile = './musicnet_import_%d.db' % os.getpid()
-        self.sqldb = sqlite3.connect('', detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+        # self.dbFile = './musicnet_import_%d.db' % os.getpid()
+        self.sqldb = sqlite3.connect('', detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
         self.sqldb.row_factory = sqlite3.Row
         c = self.sqldb.cursor()
-        #c.execute('DROP TABLE IF EXISTS nodeLookup;')
+        # c.execute('DROP TABLE IF EXISTS nodeLookup;')
         c.execute('CREATE TABLE nodeLookup (hash INTEGER, parentHash INTEGER, vertex JSON, nodeRef INTEGER);')
-        #c.execute('DROP TABLE IF EXISTS edges;')
+        # c.execute('DROP TABLE IF EXISTS edges;')
         c.execute('CREATE TABLE edges (startNodeHash INTEGER, relationship TEXT, endNodeHash INTEGER, properties JSON);')
         c.execute('CREATE INDEX nodeLookup_hash_IDX on nodeLookup (hash);')
         self.sqldb.commit()
@@ -320,7 +326,7 @@ class NodeFarm():
                    'parentHash': parentHash,
                    'vertex': vertexJSON }
         sql = 'INSERT INTO nodeLookup (hash, parentHash, vertex) VALUES (:hash, :parentHash, :vertex); '
-        self.writeBuffer.append( (sql, values) )
+        self.writeBuffer.append((sql, values))
         # return a copy of the node data with a real vertex
         valuesCopy = values.copy()
         valuesCopy['vertex'] = vertex
@@ -334,7 +340,7 @@ class NodeFarm():
         values = { 'hashValue': node['hash'],
                    'value': value }
         sql = 'UPDATE nodeLookup SET %s = :value WHERE hash = :hashValue; ' % column
-        self.writeBuffer.append( (sql, values) )
+        self.writeBuffer.append((sql, values))
     
     def addEdge(self, start, relation, end, properties=None):
         if len(self.writeBuffer) > 1000:
@@ -348,14 +354,14 @@ class NodeFarm():
         if not isinstance(startHash, int) or not isinstance(endHash, int):
             raise Exception('bad hash!')
         values = { 'start': startHash,
-                   'relation': relation, 
+                   'relation': relation,
                    'end': endHash }
         if properties:
             sql = 'INSERT INTO edges (startNodeHash, relationship, endNodeHash, properties) VALUES (:start, :relation, :end, :props); '
             values['props'] = json.dumps(properties)
         else:
             sql = 'INSERT INTO edges (startNodeHash, relationship, endNodeHash) VALUES (:start, :relation, :end); '
-        self.writeBuffer.append( (sql, values) )
+        self.writeBuffer.append((sql, values))
         return values
 
     def getNodeFromHash(self, hashVal):
@@ -401,10 +407,10 @@ class Database(object):
     GraphDatabaseService('http://localhost:7474/db/data/')
     '''
     
-    _DOC_ORDER = [ 'wipeDatabase', 'addScore', 'listScores', 'listNodeTypes', 'listNodeProperties', 
+    _DOC_ORDER = [ 'wipeDatabase', 'addScore', 'listScores', 'listNodeTypes', 'listNodeProperties',
                    'listRelationshipTypes', 'listRelationshipProperties', 'addPropertyCallback' ]
     _DOC_ATTR = {
-    'graph_db': 'The instance of a :class:`py2neo.neo4j.GraphDatabaseService` object connected to this object, which is in turn connected to a Neo4j server either at the default location on the present computer, or the one specified by the Database `uri` argument.',             
+    'graph_db': 'The instance of a :class:`py2neo.neo4j.GraphDatabaseService` object connected to this object, which is in turn connected to a Neo4j server either at the default location on the present computer, or the one specified by the Database `uri` argument.',
     }
     HIDEFROMDATABASE = 1
 
@@ -419,18 +425,18 @@ class Database(object):
         self._defaultCallbacks()
         self._m21SuperclassLookup = self._inspectMusic21ExpressionsArticulations()
         self._skipProperties = ('_activeSite', 'id', '_classes', 'groups', 'sites',
-                               '_derivation', '_overriddenLily', '_definedContexts', '_activeSiteId', 
-                               '_idLastDeepCopyOf', '_mutable', '_elements', '_cache', 'isFlat', 
-                               'autosort', '_components', '_unlinkedDuration', 'isSorted', 
+                               '_derivation', '_overriddenLily', '_definedContexts', '_activeSiteId',
+                               '_idLastDeepCopyOf', '_mutable', '_elements', '_cache', 'isFlat',
+                               'autosort', '_components', '_unlinkedDuration', 'isSorted',
                                'flattenedRepresentationOf', '_reprHead', 'idLocal', 'autoSort',
-                               'inherited', '_fullyQualifiedClasses', 'filePath', 'fileFormat', 
+                               'inherited', '_fullyQualifiedClasses', 'filePath', 'fileFormat',
                                'fileNumber', 'spannedElements') 
 
     def _refreshGraphDB(self):
         try:
             self.graph_db = py2neo.neo4j.GraphDatabaseService(self.uri, **self.dbargs)
         except py2neo.packages.httpstream.http.SocketError:
-        #1.4: except py2neo.rest.SocketError:
+        # 1.4: except py2neo.rest.SocketError:
             sys.exit('Unable to connect to database.\n')
 
     def wipeDatabase(self):
@@ -451,14 +457,20 @@ class Database(object):
         '''
         q = Query(self)
         q.setStartRelationship()
-        while (_serverCall(self.graph_db.get_relationship_count)):
-            results, meta = q.results(limit=100)
+        rGen = q.results()
+        while True:
+            results = rGen.next(limit=100)
+            if not results:
+                break
             results = [x[0] for x in results]
             _serverCall(self.graph_db.delete, *results)
         q = Query(self)
         q.setStartNode()
-        while (_serverCall(self.graph_db.get_node_count) > 1):
-            results, meta = q.results(limit=100)
+        rGen = q.results()
+        while True:
+            results = rGen.next(limit=100)
+            if not results:
+                break
             results = [x[0] for x in results]
             _serverCall(self.graph_db.delete, *results)
 
@@ -488,7 +500,7 @@ class Database(object):
         self._extractState = { 'verbose': verbose,
                               'nodeCnt': 0,
                               'relationCnt': 0,
-                              'nodeLookup': {} } #vertex, parent, voice
+                              'nodeLookup': {} }  # vertex, parent, voice
         import copy
         if verbose:
             self.lastProgress = 0
@@ -499,7 +511,7 @@ class Database(object):
         self._writeNodesToDatabase()        
         self._writeEdgesToDatabase(score)
 
-    def listScores(self, start=0, limit=100):
+    def listScores(self): # start=0, limit=100):
         '''Returns a list of dict objects with information about the scores that have been added 
         to the database, with keys for `movementName` and `_names` (a list of 
         contributor/composer names).
@@ -518,7 +530,9 @@ class Database(object):
         contributor = inMetadata.start
         q.addReturns(meta.movementName, contributor._names, score.corpusFilepath)
         q.limitReturnToWhere = True
-        results, meta = q.results(start, limit)
+        rGen = q.results()
+        results = rGen.fetch_all()
+        meta = results[0]._fields
         columns = [x[x.find('.') + 1:] for x in meta]
         scores = {}
         for row in results:
@@ -572,7 +586,8 @@ class Database(object):
         q.limitReturnToWhere = False
         for nodeType in self.nTypes:
             q.setStartNode(nodeType=nodeType)
-            results, meta = q.results(limit=10000)
+            rGen = q.results(limit=10000)
+            results = rGen.fetch_all()
             results = [x[0] for x in results]
             nodes = _serverCall(self.graph_db.get_properties, *results)
             properties = {}
@@ -631,19 +646,23 @@ class Database(object):
         relateTypes = []
         while not relateTypes:
             queryText = 'START r=relationship(*) RETURN DISTINCT TYPE(r);'
-            relateTypes, metadata = _cypherQuery(self.graph_db, queryText)
+            rGen = Results(queryText)
+            rGen.start()
+            relateTypes = rGen.fetch_all()
+            #relateTypes, metadata = _cypherQuery(self.graph_db, queryText)
         for relateType in relateTypes:
             q = Query(self)
             r = q.setStartRelationship(relationType=str(relateType[0]))
             q.addReturns(r.start.type, r.end.type)
             q.limitReturnToWhere = True;
-            results, meta = q.results(limit=100)
+            rGen = q.results(limit=100)
+            results = rGen.fetch_all()
             for n1, n2 in results:
-                rTypes.add( (n1, relateType[0], n2) )
+                rTypes.add((n1, relateType[0], n2))
                 self.nTypes.add(n1)
                 self.nTypes.add(n2)
         for start, r, end in rTypes:
-            self.rTypes.append( { 'start': start, 'type': r, 'end': end } )
+            self.rTypes.append({ 'start': start, 'type': r, 'end': end })
         return self.rTypes
     
     def listRelationshipProperties(self):
@@ -668,7 +687,8 @@ class Database(object):
         for rType in rTypes:
             q = Query(self)
             q.setStartRelationship(relationType=rType)
-            results, meta = q.results(limit=10000)
+            rGen = q.results(limit=10000)
+            results = rGen.fetch_all()
             results = [x[0] for x in results]
             nodes = _serverCall(self.graph_db.get_properties, *results)
             properties = {}
@@ -753,7 +773,7 @@ class Database(object):
         def addSignaturesAndClefs(db, measure, vertex, partNode):
             if measure.clef:
                 self._extractState['clef'] = measure.clef.classes[0]
-            #vertex['barDuration'] = self._extractState['barDuration']
+            # vertex['barDuration'] = self._extractState['barDuration']
             vertex['clef'] = self._extractState['clef']
             if measure.timeSignature:
                 self._extractState['timeSignature'] = measure.timeSignature.ratioString
@@ -799,7 +819,7 @@ class Database(object):
                 if (voiceleadingHistory and 
                         offset - prevOffset <= self._extractState['barDuration']):
                     mint = noteObj.midi - prevNote.midi
-                    db._addEdge(prevNote, 'NoteToNote', noteObj, { 'interval': mint, 'byBeat': byBeat } )
+                    db._addEdge(prevNote, 'NoteToNote', noteObj, { 'interval': mint, 'byBeat': byBeat })
                 try:
                     saveLoc = history['NoteToNote'][voice]
                 except KeyError:
@@ -812,7 +832,7 @@ class Database(object):
             addVoiceleading(db, 'False', vertex, measureNode)
             if noteObj.offset % 1 == 0:
                 addVoiceleading(db, 'True', vertex, measureNode)
-            #del vertex['voice']
+            # del vertex['voice']
         self.addPropertyCallback('Note', addNoteVoiceleading)
 
         # Pitch
@@ -950,7 +970,7 @@ class Database(object):
                 if key in self._skipProperties:
                     continue
                 if key == 'position':
-                    continue # There are empty objects with non-empty positions.
+                    continue  # There are empty objects with non-empty positions.
                 if not val:
                     continue
                 if hasattr(val, '__dict__'):
@@ -1057,7 +1077,7 @@ class Database(object):
     def _addEdge(self, start, relationship, end, propertyNode=None):
         if isinstance(propertyNode, dict):
             properties = propertyNode
-        elif isinstance(propertyNode, base.Music21Object): # in case of Spanners
+        elif isinstance(propertyNode, base.Music21Object):  # in case of Spanners
             propertyData = self._extractObject(propertyNode)
             properties = propertyData['vertex']
         else:
@@ -1180,7 +1200,7 @@ class Database(object):
                     edgeRef.append(edge['properties'])
                 edgeRefs.append(tuple(edgeRef))
             _serverCall(self.graph_db.create, *edgeRefs)
-            #self._extractState['relationCnt'] += batchLen
+            # self._extractState['relationCnt'] += batchLen
             idx += batchSize
             if verbose:
                 self._progressReport(idx, 0, self.maxEdges, 25, 100)
@@ -1224,9 +1244,9 @@ class Query(object):
     `Cypher query language <http://docs.neo4j.org/chunked/stable/cypher-query-lang.html>`_.
     '''
     
-    _DOC_ORDER = [ 'setStartNode', 'results', 'getResultProperties', 
-                   'setStartRelationship', 'addRelationship', 'addComparisonFilter', 'addCypherFilter', 
-                   'addReturns', 'setOrder',  'music21Score', 'setObjectCallback' ]
+    _DOC_ORDER = [ 'setStartNode', 'results', 'getResultProperties',
+                   'setStartRelationship', 'addRelationship', 'addComparisonFilter', 'addCypherFilter',
+                   'addReturns', 'setOrder', 'music21Score', 'setObjectCallback' ]
     _DOC_ATTR = {
     'db': 'Blah',
     'results': 'Blah',
@@ -1289,7 +1309,7 @@ class Query(object):
         self.startId = 'ID(%s)' % node.name 
         return node
 
-    def results(self, minRow=0, limit=20, pattern=None):
+    def results(self, limit=None, pattern=None):
         '''
         Executes a query of the database using the current state of the Query object.
         Returns a tuple containing first the results, then the query metadata. 
@@ -1315,14 +1335,17 @@ class Query(object):
         >>> print q.results()
         ([[Node('http://localhost:7474/db/data/node/...')]], [u'Score1'])
         '''
-        #import py2neo.cypher as cypher
+        # import py2neo.cypher as cypher
 
         if not pattern:
-            pattern = self._assemblePattern()
-        params = { 'minRow': minRow, 'maxResults': limit }
-        results, columns = _cypherQuery(self.db.graph_db, pattern, params)
-        #_fix535(results, metadata) # Remove when issue 535 is fixed (introduced around Neo4j 1.8.1)
-        return results, columns
+            pattern = self._assemblePattern(limit=limit)
+        #params = { 'minRow': minRow, 'maxResults': limit }
+        r = Results(pattern)
+        r.start()
+        return r
+        #results, columns = _cypherQuery(self.db.graph_db, pattern, params)
+        # _fix535(results, metadata) # Remove when issue 535 is fixed (introduced around Neo4j 1.8.1)
+        #return results, columns
 
     def getResultProperties(self, result):
         '''Takes a list of :class:`py2neo.neo4j.Node` and
@@ -1621,7 +1644,7 @@ class Query(object):
                     keySig.mode = _convertFromString(measureDict['keySignatureMode'])
                 measure.insert(keySig)
             if 'timeSignature' in measureDict and (measureDict['timeSignatureIsNew'] == 'True' or firstMeasure):
-                timeSig = meter.TimeSignature(measureDict['timeSignature'])
+                timeSig = music21.meter.TimeSignature(measureDict['timeSignature'])
                 measure.insert(timeSig)
             for key in ('clef', 'keySignatureSharps', 'keySignatureMode', 'timeSignature'):
                 if key in measureDict:
@@ -1737,7 +1760,7 @@ class Query(object):
             for cName, ref in classes:
                 self.m21_classes[mName][cName] = ref
 
-    def _assemblePattern(self, distinct=False):
+    def _assemblePattern(self, limit=None, distinct=False):
 #        for node in self.nodes:
 #            self.addComparisonFilter(node.type, '=', node.nodeType)
         if self.pattern:
@@ -1762,12 +1785,13 @@ class Query(object):
 #            props = [x for x in props if isinstance(x, music21.musicNet.Property) and x.name != 'ID']
         props = [str(x) for x in set(props)]
         distinctStr = ''
-        #if (distinct):
+        # if (distinct):
         #    distinctStr = 'distinct '
+        limitStr = ''
+        if limit:
+            limitStr = 'LIMIT %d\n' % limit
         returnStr = 'return ' + distinctStr + ', '.join(props) + '\n'
-        limitStr = 'limit {maxResults}\n'
-        skipStr = 'skip {minRow}\n'
-        self.pattern = startStr + matchStr + whereStr + returnStr + self.order + skipStr + limitStr + ';'
+        self.pattern = startStr + matchStr + whereStr + returnStr + limitStr + ';'
         return self.pattern
 
     def _addHierarchicalNodes(self, results, metadata, buildFullScore):
@@ -1792,7 +1816,8 @@ class Query(object):
             node.queryName = metadata[i]
             n.id = _id(node)
             q.setStartNode(n)
-            subresults, meta = q.results()
+            rGen = q.results()
+            subresults = rGen.fetch_all()
             self._filterNodesAndRelationships(subresults[0], nodes, relations)
         measures = [x for x in nodes.values() if _getPy2neoMetadata(x)['type'] == 'Measure']
         measureNumbers = [_getPy2neoMetadata(x)['number'] for x in measures]
@@ -1815,7 +1840,8 @@ class Query(object):
                 mRelate = q.addRelationship(relationType='MeasureInPart', end=p)
                 m = mRelate.start
                 q.addComparisonFilter(m.number, '=', number)
-        subresults, meta = q.results()
+        rGen = q.results()
+        subresults = rGen.fetch_all()
         self._filterNodesAndRelationships(subresults[0], nodes, relations)
         
         if (buildFullScore):
@@ -1857,14 +1883,15 @@ class Query(object):
         n = Node(q, nodeId=_id(node))
         q.setStartNode(n)
         q.addRelationship(relationType=rType, end=n)
-        subresults, meta = q.results(limit=500)
+        rGen = q.results(limit=500)
+        subresults = rGen.fetch_all()
         for result in subresults:
             self._filterNodesAndRelationships(result, nodes, relations)
                     
     def _addHierarchicalMusic21Data(self, parent, parentId, nodes, relates):
         # Some bits of the music21-to-MusicXML conversion process are sensitive to order.
         relatesToNode = sorted([x for x in relates if _id(x[0].end_node) == parentId],
-                               key = lambda r: _id(r[0]))
+                               key=lambda r: _id(r[0]))
         for r in relatesToNode:
             rType = r[0]['type']
             parentType = parent.__class__.__name__
@@ -1918,7 +1945,7 @@ class Entity(object):
     '''
 
     _DOC_ATTR = {
-    'name': 'The text string that names the entity in the query and in the results.',             
+    'name': 'The text string that names the entity in the query and in the results.',
     }
     
     def __init__(self, query):
