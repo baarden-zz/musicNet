@@ -60,11 +60,9 @@ Neo4j operation is nearly plug-and-play. To start the database server from the c
 just move to the database directory and enter::
 
     $ bin/neo4j start
-    
-After importing one or more files the relationship automatic index must still be manually
-created with this command::
 
-    $ bin/neo4j-shell -c 'index --create relationship_auto_index -t Relationship'
+By default the Java virtual machine that runs Neo4j sets aside a small amount of heap space. 
+This should be raised to at least 512MB by editing the conf/neo4j-wrapper.conf file.
     
 Contents
 ------------- 
@@ -530,7 +528,7 @@ class Database(object):
         contributor = inMetadata.start
         q.addReturns(meta.movementName, contributor._names, score.corpusFilepath)
         q.limitReturnToWhere = True
-        rGen = q.results()
+        rGen = q.results(omitStart=True)
         results = rGen.fetch_all()
         meta = results[0]._fields
         columns = [x[x.find('.') + 1:] for x in meta]
@@ -585,8 +583,8 @@ class Database(object):
         q = Query(self)
         q.limitReturnToWhere = False
         for nodeType in self.nTypes:
-            q.setStartNode(nodeType=nodeType)
-            rGen = q.results(limit=10000)
+            q.setStartNode(nodeType=nodeType, noIndex=True)
+            rGen = q.results(limit=1000, omitStart=True)
             results = rGen.fetch_all()
             results = [x[0] for x in results]
             nodes = _serverCall(self.graph_db.get_properties, *results)
@@ -655,7 +653,7 @@ class Database(object):
             r = q.setStartRelationship(relationType=str(relateType[0]))
             q.addReturns(r.start.type, r.end.type)
             q.limitReturnToWhere = True;
-            rGen = q.results(limit=100)
+            rGen = q.results(limit=100, omitStart=True)
             results = rGen.fetch_all()
             for n1, n2 in results:
                 rTypes.add((n1, relateType[0], n2))
@@ -686,8 +684,9 @@ class Database(object):
         self.relatePropertyValues = []
         for rType in rTypes:
             q = Query(self)
-            q.setStartRelationship(relationType=rType)
-            rGen = q.results(limit=10000)
+            r = q.setStartRelationship(relationType=rType)
+            q.addReturns(r.name)
+            rGen = q.results(limit=1000, omitStart=True)
             results = rGen.fetch_all()
             results = [x[0] for x in results]
             nodes = _serverCall(self.graph_db.get_properties, *results)
@@ -752,8 +751,10 @@ class Database(object):
                     number = number + 1
                     partVertex = { 'number': number,
                                    'type': 'Part' }
+                    #self._addNode(obj, score, partVertex)
                     self.nodeFarm.addNode(obj, score, partVertex)
-                    self.maxNodes = self.maxNodes + 1
+                    #self.maxNodes = self.maxNodes + 1
+                    #obj.addedToDB = True
         self.addPropertyCallback('Score', addNumbersToParts)
         
         # Contributor
@@ -987,7 +988,7 @@ class Database(object):
         self.addPropertyCallback('TimeSignature', getBarDuration)
         
         # Omitted objects
-        # KeySignature, MiscTandam, RomanNumeral
+        # KeySignature, MiscTandam, RomanNumeral, StreamStatus
         def skipThisObject(db, obj, vertex, parentNode):
             return HIDEFROMDATABASE
         self.addPropertyCallback('KeySignature', skipThisObject)
@@ -995,6 +996,7 @@ class Database(object):
         self.addPropertyCallback('RTMeasure', skipThisObject)
         self.addPropertyCallback('RomanTextUnprocessedToken', skipThisObject)
         self.addPropertyCallback('RTPhraseBoundary', skipThisObject)
+        self.addPropertyCallback('StreamStatus', skipThisObject)
 
     def _inspectMusic21ExpressionsArticulations(self):
         import inspect
@@ -1052,9 +1054,15 @@ class Database(object):
             self._extractNodes(item, objNode)
 
     def _addNode(self, node, parentData=None, vertex=None):
+        #if getattr(node, 'addedToDB', False):
+        #    return self.HIDEFROMDATABASE
         kind = node.__class__.__name__
         if not vertex:
-            vertex = {}
+            ref = self.nodeFarm.getNodeFromObject(node)
+            if ref:
+                vertex = ref['vertex']
+            else:
+                vertex = {}
         if 'type' not in vertex:
             vertex['type'] = kind
         if hasattr(node, 'offset'):
@@ -1077,7 +1085,7 @@ class Database(object):
     def _addEdge(self, start, relationship, end, propertyNode=None):
         if isinstance(propertyNode, dict):
             properties = propertyNode
-        elif isinstance(propertyNode, base.Music21Object):  # in case of Spanners
+        elif isinstance(propertyNode, music21.base.Music21Object):  # in case of Spanners
             propertyData = self._extractObject(propertyNode)
             properties = propertyData['vertex']
         else:
@@ -1130,7 +1138,7 @@ class Database(object):
                 for key, text in val.iteritems():
                     vertex[key] = text
                 continue
-            elif isinstance(val, music21.musicxml.base.MusicXMLElement):
+            elif isinstance(val, music21.musicxml.mxObjects.MusicXMLElement):
                 continue
             elif hasattr(val, '__dict__'):
                 self._extractNodes(val, objData)
@@ -1272,7 +1280,7 @@ class Query(object):
         self._defaultCallbacks()
         self._inspectMusic21ExpressionsArticulations()
         
-    def setStartNode(self, node=None, nodeType=None, name=None, nodeId=None):
+    def setStartNode(self, node=None, nodeType=None, name=None, nodeId=None, noIndex=False):
         '''Sets a starting :class:`Node` for the Query, and returns that node. 
         Searches begin from this point and branch out to find patterns that fit the query. 
         If we already have a Node object, that can be used as the `node` argument. 
@@ -1303,13 +1311,17 @@ class Query(object):
             node = Node(self, nodeType=nodeType, name=name)
         if node.id:
             self.start = 'start %s=node(%d)\n' % (node.name, node.id)
+        elif noIndex:
+            self.match = ['(%s)' % node.name]
+            self.where = []
+            self.addComparisonFilter(node.type, '=', nodeType)
         else:
             self.start = 'start %s=node:node_auto_index("type:%s")\n' % (node.name, node.nodeType)
         self.order = 'order by ID(%s)\n' % node.name
         self.startId = 'ID(%s)' % node.name 
         return node
 
-    def results(self, limit=None, pattern=None):
+    def results(self, limit=None, pattern=None, omitStart=False):
         '''
         Executes a query of the database using the current state of the Query object.
         Returns a tuple containing first the results, then the query metadata. 
@@ -1338,7 +1350,7 @@ class Query(object):
         # import py2neo.cypher as cypher
 
         if not pattern:
-            pattern = self._assemblePattern(limit=limit)
+            pattern = self._assemblePattern(limit=limit, omitStart=omitStart)
         #params = { 'minRow': minRow, 'maxResults': limit }
         r = Results(pattern)
         r.start()
@@ -1605,13 +1617,10 @@ class Query(object):
         
         # BeamInNote
         def addBeam(self, beamDict, beam, note, r):
-            number = _convertFromString(beamDict.get('number', 'None'))
-            direction = _convertFromString(beamDict.get('direction', 'None'))
-            beamType = beamDict['m21_type']
-            if number != None:
-                note.beams.setByNumber(number, beamType, direction)
-            else:
-                note.beams.append(beamType, direction)
+            beam.type = beamDict['m21_type']
+            beam.number = _convertFromString(beamDict.get('number', 'None'))
+            beam.direction = _convertFromString(beamDict.get('direction', 'None'))
+            note.beams.append(beam)
             return None
         self.setObjectCallback('BeamInNote', addBeam)
         
@@ -1622,6 +1631,13 @@ class Query(object):
             metadataObj.addContributor(contributor)
             return contributor
         self.setObjectCallback('ContributorInMetadata', addContributorText)
+        
+        # MetadataInScore
+        def addMetadata(self, metadataDict, metadata, scoreObj, r):
+            metadata = music21.metadata.Metadata()
+            scoreObj.insert(metadata)
+            return metadata
+        self.setObjectCallback('MetadataInScore', addMetadata)        
         
         # PartInScore
         def removePartNumber(self, partDict, part, score, r):
@@ -1743,8 +1759,11 @@ class Query(object):
         import inspect
         self.classLookup = {}
         for importer, modname, ispkg in pkgutil.iter_modules(music21.__path__):
-            if ispkg: continue
-            mod = sys.modules['music21.' + modname]
+            #if ispkg: continue
+            modname = 'music21.' + modname
+            if modname not in sys.modules:
+                continue
+            mod = sys.modules[modname]
             for c in inspect.getmembers(mod, inspect.isclass):
                 self.classLookup[c[0]] = getattr(mod, c[0])
         return self.classLookup
@@ -1760,15 +1779,17 @@ class Query(object):
             for cName, ref in classes:
                 self.m21_classes[mName][cName] = ref
 
-    def _assemblePattern(self, limit=None, distinct=False):
+    def _assemblePattern(self, limit=None, distinct=False, omitStart=False):
 #        for node in self.nodes:
 #            self.addComparisonFilter(node.type, '=', node.nodeType)
         if self.pattern:
             return self.pattern
-        startStr = self.start
-        if startStr == None:
-            sys.stderr.write('setStartNode() or setStartRelationship() must be called first.\n')
-            sys.exit(1)
+        startStr = ''
+        if not omitStart:
+            startStr = self.start
+            if startStr == None:
+                sys.stderr.write('setStartNode() or setStartRelationship() must be called first.\n')
+                sys.exit(1)
         matchStr = whereStr = returnStr = ''
         if self.match:
             matchStr = 'match\n' + ',\n'.join([str(x) for x in self.match]) + '\n'
@@ -1778,8 +1799,8 @@ class Query(object):
         if self.returns:
             props = self.returns[:]
 #            returnStr = 'return ' + ', '.join([str(x) for x in self.returns]) + '\n'
-#       else:
-        if self.limitReturnToWhere == False:
+        else:
+        #if self.limitReturnToWhere == False:
             props.append('*')
 #            [props.extend([x.pre, x.post]) for x in self.where]
 #            props = [x for x in props if isinstance(x, music21.musicNet.Property) and x.name != 'ID']
@@ -1790,6 +1811,8 @@ class Query(object):
         limitStr = ''
         if limit:
             limitStr = 'LIMIT %d\n' % limit
+        else:
+            limitStr = 'LIMIT 100'
         returnStr = 'return ' + distinctStr + ', '.join(props) + '\n'
         self.pattern = startStr + matchStr + whereStr + returnStr + limitStr + ';'
         return self.pattern
@@ -1904,7 +1927,7 @@ class Query(object):
                 continue
             queryName = getattr(nodes[childId][0], 'queryName', None)
             if queryName:
-                child.editorial.color = "red"
+                child.editorial.color = 'red'
                 child.queryName = queryName
             self.nodeLookup[childId] = child
             self._addHierarchicalMusic21Data(child, childId, nodes, relates)
@@ -2082,6 +2105,8 @@ class Property(Entity):
     def __repr__(self):
         if (self.name == 'ID'):
             return 'ID(%s)' % self.parent.name
+        elif (self.name == 'type' and isinstance(self.parent, Relationship)):
+            return 'TYPE(%s)' % self.parent.name
         return '%s.%s' % (self.parent.name, self.name)
     
     def __getattr__(self):
@@ -2155,7 +2180,7 @@ class Moment(music21.base.Music21Object):
     }
         
     def __init__(self, components=None, sameOffset=None, *arguments):
-        base.Music21Object.__init__(self)
+        music21.base.Music21Object.__init__(self)
         self.sameOffset = weakref.WeakSet()
         self.simultaneous = weakref.WeakSet()
         if components:
@@ -2172,11 +2197,11 @@ class Moment(music21.base.Music21Object):
         object. If a Note has the same offset as this object, a reference to it
         is added to `sameOffset`. Otherwise a reference is added to `simultaneous`.
         '''
-        if not common.isListLike(components):
+        if not music21.common.isListLike(components):
             components = [components]
         components += arguments
         for c in components:
-            if not isinstance(c, note.Note):
+            if not isinstance(c, music21.note.Note):
                 raise ValueError('cannot add a non-Note object to a Moment')
             if sameOffset == True:
                 self.sameOffset.add(c)

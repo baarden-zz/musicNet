@@ -164,7 +164,6 @@ def listNodeProperties():
     '''
     rows = app.db.listNodeProperties()
     for row in rows:
-        #print row ###
         yield json.dumps(row) + '\n'
 
 @app.route('/listnodepropertyvalues')
@@ -551,6 +550,7 @@ def generate_results(token, minRow, limit):
     if not data:
         raise StopIteration
     metadata = data[0]._fields
+    print metadata
     data = [tuple(x) for x in data]
     rLookup = {}
     for i in range(len(metadata)):
@@ -560,6 +560,7 @@ def generate_results(token, minRow, limit):
         queryIdx = idx + minRow
         # remove any None values from the output
         row = data[idx]
+        print row
         objects = []
         objects_meta = []
         nonobjects = []
@@ -598,6 +599,7 @@ def generate_results(token, minRow, limit):
             item = { 'type': 'metadata', 'data': meta_output }
             yield json.dumps(item) + '\n'
         item = { 'type': 'data', 'index': queryIdx, 'data': output }
+        print item
         yield json.dumps(item) + '\n'
     expireTokens()
 
@@ -692,13 +694,16 @@ def addComparisonFilter(query, comparison, properties):
 def addScoreInfo(results, row, metadata, idx):
     if idx == 0:
         metadata.extend(['score', 'parts', 'measures'])
-    instruments = []
+    instruments = set()
+    parts = set()
     mms = set()
     filepath = ''
     for el in results:
         kind = el[1]['type']
         if (kind == 'Instrument'):
-            instruments.append(el[1]['partName'])
+            instruments.add(el[1]['partName'])
+        elif (kind == 'Part'):
+            parts.add(str(el[1]['number']))
         elif (kind == 'Measure'):
             mms.add(el[1]['number'])
         elif (kind == 'Score'):
@@ -707,7 +712,11 @@ def addScoreInfo(results, row, metadata, idx):
         measureTxt = '%d-%d' % (min(mms), max(mms))
     else:
         measureTxt = '%d' % mms.pop()
-    row.extend([filepath, ','.join(instruments), measureTxt])
+    if instruments:
+        partNames = ','.join(instruments)
+    else:
+        partNames = ','.join(parts)
+    row.extend([filepath, partNames, measureTxt])
 
 def objectValueMap(data):
     kind = data['type']
