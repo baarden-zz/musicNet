@@ -266,12 +266,12 @@ def _id(item):
 
 def _serverCall(func, *args):
     while True:
- #       try:
+#       try:
         r = func(*args)
 #        except py2neo.rest.SocketError:
 #            time.sleep(0.2)
 #            continue
-        return r    
+        return r
 
 def _fix535(results, metadata):
     orderColumn = -1
@@ -1017,7 +1017,7 @@ class Database(object):
 
     def _progressReport(self, state, minIn, maxIn, minOut, maxOut):
         if not hasattr(self, 'lastProgress'):
-            lastOut = self.lastProgress = 0
+            self.lastProgress = 0
         lastOut = self.lastProgress
         rangeIn = maxIn - minIn
         rangeOut = maxOut - minOut
@@ -1164,7 +1164,6 @@ class Database(object):
         if verbose:
             self._timeUpdate()
             sys.stderr.write('Writing nodes to database...........')
-            cnt = 0
         idx = 1
         self._refreshGraphDB()
         while True:
@@ -1833,7 +1832,7 @@ class Query(object):
         n = Node(q, 'Note')
         inMeasure = q.addRelationship(relationType='NoteInMeasure', start=n)
         inPart = q.addRelationship(relationType='MeasureInPart', start=inMeasure.end)
-        inScore = q.addRelationship(relationType='PartInScore', start=inPart.end)
+        q.addRelationship(relationType='PartInScore', start=inPart.end)
         for i in range(len(results)):
             node = results[i]
             node.queryName = metadata[i]
