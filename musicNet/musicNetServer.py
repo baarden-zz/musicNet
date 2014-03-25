@@ -50,6 +50,7 @@ import flask
 
 app = flask.Flask(__name__)
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
 app.db = music21.musicNet.Database()
 app.redis = redis.StrictRedis(host='localhost', port=6379, db=0)
 app.tokens = {}
@@ -381,6 +382,9 @@ def prepareQuery():
           'returns': [],
           'makePreviews': 'True'
         }
+        
+    A NoteToNote relationship can have a special MaxDistanceBetweenNotes property; when set '=' to
+    a positive integer in a comparison filter, this will create a variable-length relationship.
     
     Data structure::
     
@@ -403,12 +407,13 @@ def prepareQuery():
     nodes = {}
     relations = {}
     properties = {}
-    measures = {}
-    parts = {}
-    instruments = {}
-    score = {}
+    measuresForNotes = {}
+    partsForMeasures = {}
+    instrumentsForParts = {}
+    scoresForParts = {}
     notes = []
     columns = []
+    print req
     if not req.get('nodes', False):
         return { 'error': 'query has no nodes' }
     for n in req['nodes']:
@@ -419,6 +424,10 @@ def prepareQuery():
             columns.append(n['name'])
         elif (n['type'] == 'Score'):
             scoreNode = node
+        elif (n['type'] in ('Measure', 'Part')):
+            columns.append(n['name'])
+    if scoreNode == None:
+        scoreNode = q.addNode('Score', 'Score')
     for r in req.get('relationships', []):
         start = nodes[r['start']]
         end = nodes[r['end']]
@@ -427,13 +436,13 @@ def prepareQuery():
                                      name=r['name'], optional=optional)
         relations[r['name']] = relation
         if (r['type'] == 'NoteInMeasure'):
-            measures[start] = end
+            measuresForNotes[start] = end
         elif (r['type'] == 'MeasureInPart'):
-            parts[start] = end
+            partsForMeasures[start] = end
         elif (r['type'] == 'InstrumentInPart'):
-            instruments[end] = start 
+            instrumentsForParts[end] = start 
         elif (r['type'] == 'PartInScore'):
-            score[start] = end
+            scoresForParts[start] = end
     if 'startNode' in req:
         q.setStartNode(nodes[req['startNode']])
     elif 'startRelationship' in req:
@@ -455,38 +464,79 @@ def prepareQuery():
         returns = [properties[r['property']] for r in req['returns']]
         columns.extend(returns);
         q.addReturns(*returns)
+#    addPartConstraints(q, parts)
     for n in notes:
-        if n not in measures.keys():
+        if n not in measuresForNotes.keys():
             m = q.addNode('Measure', 'measure_' + n.name)
             r = q.addRelationship(relationType='NoteInMeasure', start=n, end=m, name=n.name+'In'+m.name, optional=True)
-            measures[n] = m
-    for m in measures.values():
-        if m not in parts.keys():
-            p = q.addNode('Part', 'part_' + m.name)
-            r = q.addRelationship(relationType='MeasureInPart', start=m, end=p, name=m.name+'In'+p.name, optional=True)
-            parts[m] = p
-    for p in parts.values():
-        if p not in instruments.keys():
+            measuresForNotes[n] = m
+#    for m in measuresForNotes.values():
+#        if m not in partsForMeasures.keys():
+#            p = q.addNode('Part', 'part_' + m.name)
+#            r = q.addRelationship(relationType='MeasureInPart', start=m, end=p, name=m.name+'In'+p.name, optional=True)
+#            partsForMeasures[m] = p
+    for p in partsForMeasures.values():
+        if p not in instrumentsForParts.keys():
             i = q.addNode('Instrument', 'instrument_' + p.name)
             r = q.addRelationship(relationType='InstrumentInPart', start=i, end=p, name=i.name+'In'+p.name, optional=True)
-    if scoreNode == None:
-        scoreNode = q.addNode('Score', 'Score')
-    if len(score) == 0:
-        p = parts.itervalues().next()
+    if len(scoresForParts) == 0:
+        p = partsForMeasures.itervalues().next()
         r = q.addRelationship(relationType='PartInScore', start=p, end=scoreNode, name=p.name+'In'+scoreNode.name)
     previews = req.get('makePreviews', False)
     pattern = q._assemblePattern(distinct=True)
-    ipAddr = flask.request.remote_addr or "None"
-    token = hash(ipAddr + pattern)
-    rGen = music21.musicNet.Results(pattern)
-    rGen.start()
-    app.rGens[token] = rGen
-    app.tokens[token] = [pattern, columns, previews, time.time()]
+    if not pattern:
+        result = {'error': 'Unable to assemble valid query.'}
+    else:
+        print pattern ###
+        ipAddr = flask.request.remote_addr or "None"
+        token = hash(ipAddr + pattern)
+        rGen = music21.musicNet.Results(pattern)
+        rGen.start()
+        app.rGens[token] = rGen
+        app.tokens[token] = [pattern, columns, previews, time.time()]
+        result = { 'token': token }
     expireTokens()
-    result = { 'token': token }
-    print 'result: ' + str(result)
-    return flask.jsonify(**result)
+    print 'result: ' + str(result) ###
+    response = json.dumps(result)
+    return response
+
+#def addPartConstraints(q, parts, properties):
+#    partList = parts.values()
+#    for i in range(len(partList) - 1):
+#        for j in range(1, len(partList)):
+#            filter = {'preType': 'property',
+#                      'pre': partList[i] + 'number',
+#                      'postType': 'property',
+#                      'post': partList[j] + 'number',
+#                      'operator': 1}
+#            addComparisonFilter(q, filter, properties)
+
+@app.route('/cancelquery')
+def cancel_query():
+    '''
+    Server address::
+     
+        /cancelquery?token=nnn
     
+    Request parameters::
+
+        token - The number returned by the submitquery service
+    
+    Response: 
+    
+        None. Attempts to cancel the query associated with the given token.
+    '''
+    print 'getting cancel request'
+    token = int(flask.request.args.get('token', ''))
+    try:
+        rGen = app.rGens[token]
+    except KeyError:
+        print 'Failed to cancel.'
+        return
+    rGen.stop()
+    print 'Canceling!'
+    del app.rGens[token]
+
 @app.route('/getresults')
 def results():
     '''
@@ -555,54 +605,25 @@ def generate_results(token, minRow, limit):
     rLookup = {}
     for i in range(len(metadata)):
         rLookup[metadata[i]] = i
-    q = music21.musicNet.Query(app.db)
     for idx in range(len(data)):
         queryIdx = idx + minRow
         # remove any None values from the output
         row = data[idx]
         print row
-        objects = []
-        objects_meta = []
-        nonobjects = []
-        nonobjects_meta = []
-        for i in range(len(row)):
-            item = row[i]
-            #1.4: superclass = py2neo.rest.Resource
-            superclass = py2neo.neo4j.Resource
-            if isinstance(item, superclass):
-                objects.append(item)
-                objects_meta.append(metadata[i])
-            elif not item is None:
-                nonobjects.append(item)
-                nonobjects_meta.append(metadata[i])
-        # get extended results and limit to requested values
-        result = q.getResultProperties(objects)
-        objects = [objectValueMap(x[1]) for x in result]
-        items = objects + nonobjects
-        headers = objects_meta + nonobjects_meta
-        output = []
-        meta_output = columns[:]
-        for r in meta_output:
-            output.append(items[headers.index(r)])
-        addScoreInfo(result, output, meta_output, idx)
-        if previews:
-            output_objects = []
-            output_meta = []
-            for i in range(len(result)):
-                if objects_meta[i] in columns:
-                    output_objects.append(result[i][0])
-                    output_meta.append(objects_meta[i])
-            vals = { 'index': queryIdx, 'result': output_objects, 'metadata': output_meta, 'token': token }
-            pvals = pickle.dumps(vals)
-            app.redis.rpush('inQueue', pvals)
+        output, metaOutput, previewData = makeScore(row, metadata, columns, previews)
         if idx == 0:
-            item = { 'type': 'metadata', 'data': meta_output }
+            item = { 'type': 'metadata', 'data': metaOutput }
             yield json.dumps(item) + '\n'
+        if previews:
+            previewData['index'] = queryIdx
+            previewData['token'] = token
+            pvals = pickle.dumps(previewData)
+            app.redis.rpush('inQueue', pvals)
         item = { 'type': 'data', 'index': queryIdx, 'data': output }
         print item
         yield json.dumps(item) + '\n'
     expireTokens()
-
+        
 @app.route('/getimages')
 def getImage():
     '''
@@ -684,16 +705,58 @@ def addImage(imageDict):
 
 def addComparisonFilter(query, comparison, properties):
     pre = comparison['pre']
+    post = comparison['post']
     if comparison['preType'] == 'property':
         pre = properties[pre]
-    post = comparison['post']
+        if pre.name == 'MaxDistanceBetweenNotes':
+            relation = pre.parent
+            relation.maxDistance = post
+            return
     if comparison['postType'] == 'property':
         post = properties[post]
     query.addComparisonFilter(pre, comparison['operator'], post)
 
-def addScoreInfo(results, row, metadata, idx):
-    if idx == 0:
-        metadata.extend(['score', 'parts', 'measures'])
+def makeScore(row, metadata, columns, previews):
+    objects = []
+    objects_meta = []
+    nonobjects = []
+    nonobjects_meta = []
+    for i in range(len(row)):
+        item = row[i]
+        #1.4: superclass = py2neo.rest.Resource
+        superclass = py2neo.neo4j.Resource
+        if isinstance(item, superclass):
+            objects.append(item)
+            objects_meta.append(metadata[i])
+        elif not item is None:
+            nonobjects.append(item)
+            nonobjects_meta.append(metadata[i])
+    # get extended results and limit to requested values
+    print 'Objects: ' + repr(objects)
+    q = music21.musicNet.Query(app.db)
+    result = q.getResultProperties(objects)
+    objects = [objectValueMap(x[1]) for x in result]
+    items = objects + nonobjects
+    headers = objects_meta + nonobjects_meta
+    output = []
+    metaOutput = columns[:]
+    for r in metaOutput:
+        output.append(items[headers.index(r)])
+    addScoreInfo(result, output, metaOutput)
+    print 'Result: ' + repr(result) ###
+    previewData = None
+    if previews:
+        output_objects = []
+        output_meta = []
+        for i in range(len(result)):
+            if objects_meta[i] in columns:
+                output_objects.append(result[i][0])
+                output_meta.append(objects_meta[i])
+        previewData = { 'result': output_objects, 'metadata': output_meta }
+    return output, metaOutput, previewData
+
+def addScoreInfo(results, row, metadata):
+    metadata.extend(['score', 'parts', 'measures'])
     instruments = set()
     parts = set()
     mms = set()
@@ -724,7 +787,7 @@ def objectValueMap(data):
         return data['pitch']
     if kind == 'NoteSimultaneousWithNote':
         return data['harmonicInterval']
-    if kind == 'NoteToNote' or kind == 'NoteToNoteByBeat':
+    if kind == 'NoteToNote':
         return data['interval']
     else:
         return '-'
@@ -743,6 +806,7 @@ if __name__ == "__main__":
                       help='-a|--address : the IP address of the server')
     (options, args) = parser.parse_args()
     
+    start = time.clock()
     print "Loading relationship types..."
     app.db.listRelationshipTypes()
     print "Loading node property values..."
@@ -750,7 +814,7 @@ if __name__ == "__main__":
     print "Loading relationship property values..."
     app.db.listRelationshipPropertyValues()
     
-    print 'Running.'
+    print 'Running. (Startup in %d seconds)' % (time.clock() - start)
     app.run(host=options.address) #reloader=True
     
     

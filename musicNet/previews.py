@@ -2,6 +2,7 @@
 
 import os
 import time
+import subprocess
 import multiprocessing
 import pickle
 import redis
@@ -10,6 +11,10 @@ import music21.musicNet
 import tempfile
 import py2neo
 
+'''
+Requires a server with Lilypond >=2.17 and ImageMagick installed, 
+as well as a functioning MusicNet server.
+'''
 
 class GeneratePreviews(multiprocessing.Process):
     '''
@@ -45,9 +50,14 @@ class GeneratePreviews(multiprocessing.Process):
                 time.sleep(0.2)
                 continue
             scoreDict = pickle.loads(val)
+            print "===SCORE %d.\n" % scoreDict['index']
+            start = time.clock()
             q = music21.musicNet.Query(db)
             score = q.music21Score(scoreDict['result'], scoreDict['metadata'])
+            print 'Seconds to build score: %f' % (time.clock() - start)
+            start = time.clock()            
             path = self.makePreview(score)
+            print 'Seconds to build preview: %f' % (time.clock() - start)
             imageDict = { 'index': scoreDict['index'], 'path': path, 'token': scoreDict['token'] }
             self.redis.rpush('outQueue', pickle.dumps(imageDict))
     
@@ -62,22 +72,26 @@ class GeneratePreviews(multiprocessing.Process):
         header = [x for x in conv.context.contents if isinstance(x, music21.lily.lilyObjects.LyLilypondHeader)][0]
         header.lilypondHeaderBody = 'tagline = ""'
         conv.runThroughLily(backend='eps -dresolution=200', format='png', fileName=filename)
-        from subprocess import call
         filename += '.png'
-        call(['convert', '-trim', filename, filename])
+        subprocess.call(['convert', '-trim', filename, filename])
         return os.path.basename(filename)
 
 def newWorker():
     worker = GeneratePreviews()
-    worker.daemon = True
+    #worker.daemon = True
     print 'Starting new worker.'
     worker.start()
     return worker
 
 if __name__ == "__main__":
+    import optparse
+    parser = optparse.OptionParser()
+    parser.add_option('-w', '--workers', dest='workers', default=multiprocessing.cpu_count(),
+                      help='-w|--workers : number of multiprocessing workers (default: 1 per CPU)')
+    (options, args) = parser.parse_args()
 
     previewWorkers = []
-    workerCount = multiprocessing.cpu_count()
+    workerCount = int(options.workers)
     for i in range(workerCount):
         previewWorkers.append(newWorker())
     print 'Running.'
