@@ -16,7 +16,7 @@
 This is an app that provides a RESTful JSON interface to the music21.musicNet objects.
 Any client with the ability to send/receive JSON can use a remote
 server running this app to execute queries and return the results. It's dependent on
-the Python Flask, py2neo, and redis modules. (Doctests are dependent on the webtest module.)
+the Python Flask, py2neo, redis, and urimagic modules. (Doctests are dependent on the webtest module.)
 
 Services with a result containing multiple rows return each row as a separate JSONItem:
 rather than returning one JSON document containing an array, each line
@@ -56,6 +56,14 @@ app.redis = redis.StrictRedis(host='localhost', port=6379, db=0)
 app.tokens = {}
 app.rGens = {}
 app.images = {}
+
+
+def _getPy2neoMetadata(node):
+    ''' Returns the hidden metadata of a py2neo object, 
+    the location of which can change depending on the version of Neo4j.
+    '''
+    # 1.4: return node._Resource__metadata['data'] # 1.4
+    return node.columns
 
 '''
 listScores
@@ -416,7 +424,7 @@ def prepareQuery():
     print req
     if not req.get('nodes', False):
         return { 'error': 'query has no nodes' }
-    for n in req['nodes']:
+    for n in req['nodes']:  
         node = q.addNode(n['type'], n['name'])
         nodes[n['name']] = node
         if (n['type'] == 'Note'):
@@ -468,6 +476,7 @@ def prepareQuery():
     for n in notes:
         if n not in measuresForNotes.keys():
             m = q.addNode('Measure', 'measure_' + n.name)
+            columns.append(m.name)
             r = q.addRelationship(relationType='NoteInMeasure', start=n, end=m, name=n.name+'In'+m.name, optional=True)
             measuresForNotes[n] = m
 #    for m in measuresForNotes.values():
@@ -599,7 +608,8 @@ def generate_results(token, minRow, limit):
     data = rGen.next(limit)
     if not data:
         raise StopIteration
-    metadata = data[0]._fields
+    metadata = _getPy2neoMetadata(data[0])
+    #data[0]._fields
     print metadata
     data = [tuple(x) for x in data]
     rLookup = {}
