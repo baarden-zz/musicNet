@@ -50,14 +50,11 @@ class GeneratePreviews(multiprocessing.Process):
                 time.sleep(0.2)
                 continue
             scoreDict = pickle.loads(val)
-            print "===SCORE %d.\n" % scoreDict['index']
             start = time.clock()
             q = music21.musicNet.Query(db)
             score = q.music21Score(scoreDict['result'], scoreDict['metadata'])
-            print 'Seconds to build score: %f' % (time.clock() - start)
             start = time.clock()            
             path = self.makePreview(score)
-            print 'Seconds to build preview: %f' % (time.clock() - start)
             imageDict = { 'index': scoreDict['index'], 'path': path, 'token': scoreDict['token'] }
             self.redis.rpush('outQueue', pickle.dumps(imageDict))
     

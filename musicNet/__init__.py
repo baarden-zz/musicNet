@@ -199,7 +199,6 @@ class Results(threading.Thread):
         threading.Thread.__init__(self)
         py2neo.packages.httpstream.http.ConnectionPool._puddles = {}
         self.queryText = queryText
-        print queryText ###
         self.params = params
         self.results = []
         
@@ -1310,7 +1309,7 @@ class Query(object):
         self._defaultCallbacks()
         self._inspectMusic21ExpressionsArticulations()
         
-    def setStartNode(self, node=None, nodeType=None, name=None, nodeId=None, noIndex=False):
+    def setStartNode(self, node=None, nodeType=None, name=None, nodeId=None, noIndex=False, overWrite=False):
         '''Sets a starting :class:`Node` for the Query, and returns that node. 
         Searches begin from this point and branch out to find patterns that fit the query. 
         If we already have a Node object, that can be used as the `node` argument. 
@@ -1338,6 +1337,8 @@ class Query(object):
         self.pattern = None
         if node == None:
             node = Node(self, nodeType=nodeType, name=name)
+        if overWrite:
+            del self.startNodes[:]
         if node.id:
             self.startNodes.append(node)
         elif noIndex:
@@ -1617,7 +1618,6 @@ class Query(object):
                     nodes[_id(itemTuple[0])] = itemTuple
             else:
                 relations.append(itemTuple)
-        print 'Seconds to query database: %f' % (time.clock() - start)
         start = time.clock()
         score = music21.stream.Score()
         scoreNodeId = [x for x in nodes if nodes[x][1]['type'] == 'Score'][0]
@@ -1625,7 +1625,6 @@ class Query(object):
         measures = [x for x in nodes.values() if x[1]['type'] == 'Measure']
         self.scoreOffset = sorted([float(x[1]['offset']) for x in measures])[0]
         self._addHierarchicalMusic21Data(score, scoreNodeId, nodes, relations)
-        print 'Seconds to build score: %f' % (time.clock() - start)
         sys.stdout.flush()
         return score
 
@@ -1796,7 +1795,6 @@ class Query(object):
         import inspect
         self.classLookup = {}
         for importer, modname, ispkg in pkgutil.iter_modules(music21.__path__):
-            #if ispkg: continue
             modname = 'music21.' + modname
             if modname not in sys.modules:
                 continue
@@ -1817,8 +1815,6 @@ class Query(object):
                 self.m21_classes[mName][cName] = ref
 
     def _assemblePattern(self, limit=None, distinct=False, omitStart=False):
-#        for node in self.nodes:
-#            self.addComparisonFilter(node.type, '=', node.nodeType)
         if self.pattern:
             return self.pattern
         startStr = ''
@@ -1828,7 +1824,6 @@ class Query(object):
         else:
             startStr = self.start
         if startStr == None:
-            print self.startNodes ###
             sys.stderr.write('setStartNode() or setStartRelationship() must be called first.\n')
             sys.exit(1)
         matchStr = optMatchStr = whereStr = ''
@@ -1841,16 +1836,10 @@ class Query(object):
         props = []
         if self.returns:
             props = self.returns[:]
-#            returnStr = 'return ' + ', '.join([str(x) for x in self.returns]) + '\n'
         else:
-        #if self.limitReturnToWhere == False:
             props.append('*')
-#            [props.extend([x.pre, x.post]) for x in self.where]
-#            props = [x for x in props if isinstance(x, music21.musicNet.Property) and x.name != 'ID']
         props = [str(x) for x in set(props)]
         distinctStr = ''
-        # if (distinct):
-        #    distinctStr = 'distinct '
         limitStr = ''
         if limit:
             limitStr = 'LIMIT %d\n' % limit
@@ -1862,67 +1851,49 @@ class Query(object):
 
     def _addHierarchicalNodes(self, results, metadata, buildFullScore):
         ''' Fill in a minimal score hierarchy sufficient to contain the notes in the result.
-        (Assumes only Note objects are passed in the results array.)
+        Then fill in all the other notes in the minimal score.
+        Then add one more layer of nodes within the objects in the score
+        (articulations, dynamics, expressions, etc.).
         '''
         nodes = {}
         relations = {}
         self._filterNodesAndRelationships(results, nodes, relations)
-        print 'Results: ' + repr([_getPy2neoMetadata(v) for v in results])
-        measures = []
-        parts = []
-        for v in nodes.itervalues():
-            nType = _getPy2neoMetadata(v)['type']
-            if nType == 'Note':
-                v.queryNode = True
-            elif nType == 'Measure':
-                measures.append(v['number'])
-            elif nType == 'Part':
-                parts.append(_id(v))
-        measureRange = range(min(measures), max(measures) + 1)
         
-        print 'Part: ' + repr(parts)
+        # For each note in the result, fill in the structural nodes above it.
         q = Query(self.db)
-        s = None
-        for partID in parts:
-            p = Node(q, 'Part', nodeId=partID)
-            q.setStartNode(p)
-            if s is None:
-                inScore = q.addRelationship(relationType='PartInScore', start=p)
-                s = inScore.end
-            else:
-                q.addRelationship(relationType='PartInScore', start=p, end=s)
-            for measureNumber in measureRange:
-                inPart = q.addRelationship(relationType='MeasureInPart', end=p)
-                m = inPart.start
-                q.addComparisonFilter(m.number, '=', measureNumber)
-                elementsInMeasure = q.addRelationship(end=m)
-                elementsInMeasure.maxDistance = 2
-                elementsInMeasure.properties = {'structural': True}
-        rGen = q.results()
-        subresults = rGen.fetch_all()
-        for row in subresults:
-            self._filterNodesAndRelationships(row, nodes, relations)
-        results[:] = nodes.values() + relations.values()
-        return
-
-        for i in range(len(nodes)):
+        n = Node(q, 'Note')
+        q.setStartNode(n)
+        inMeasure = q.addRelationship(relationType='NoteInMeasure', start=n)
+        inPart = q.addRelationship(relationType='MeasureInPart', start=inMeasure.end)
+        inScore = q.addRelationship(relationType='PartInScore', start=inPart.end)
+        q.addRelationship(relationType='InstrumentInPart', end=inPart.end, optional=True)
+        q.addRelationship(relationType='MetadataInScore', end=inScore.end, optional=True)
+        q.addRelationship(relationType='StaffGroupInScore', end=inScore.end, optional=True)
+        for i in range(len(results)):
             node = results[i]
+            meta = _getPy2neoMetadata(node)
+            if meta['type'] != 'Note': continue
             node.queryNode = True
-            n = Node(q, 'Note', nodeId=_id(node))
-            q.setStartNode(n)
-            #inMeasure = q.addRelationship(relationType='NoteInMeasure', start=n)
-            #q.addRelationship(relationType='InstrumentInPart', end=inPart.end, optional=True)
-            #inScore = q.addRelationship(relationType='PartInScore', start=inPart.end)
-            elementsInMeasure = q.addRelationship(end=inMeasure.end)
-            elementsInMeasure.maxDistance = 2
-            elementsInMeasure.properties = {'structural': True}
-            if i == 0:
-                q.addRelationship(relationType='MetadataInScore', end=inScore.end, optional=True)
-                q.addRelationship(relationType='StaffGroupInScore', end=inScore.end, optional=True)
-            rGen = q.results()
-            subresults = rGen.fetch_all()
-            for row in subresults:
-                self._filterNodesAndRelationships(row, nodes, relations)
+            node.queryName = metadata[i]
+            n.id = _id(node)
+            q.setStartNode(n, overWrite=True)
+            subresults = q.results().next()[0]
+            self._filterNodesAndRelationships(subresults.values, nodes, relations)
+
+        if (buildFullScore):
+            # Fill in the other notes in the measures.
+            measures = [x for x in nodes.values() if _getPy2neoMetadata(x)['type'] == 'Measure']
+            for m in measures:
+                self._addChildren(m, 'NoteInMeasure', nodes, relations)
+    
+            # Add one more layer of objects below the existing ones.
+            nodeList = nodes.values()
+            for node in nodeList:
+                nType = _getPy2neoMetadata(node)['type']
+                if nType in ('Score', 'Part'):
+                    continue
+                self._addChildren(node, None, nodes, relations, structural=True)
+            
         results[:] = nodes.values() + relations.values()
 
     def _filterNodesAndRelationships(self, results, nodes, relations):
@@ -1938,17 +1909,20 @@ class Query(object):
             elif isinstance(item, py2neo.neo4j.Relationship):
                 relations[_id(item)] = item
     
-    def _addChildren(self, node, rType, nodes, relations):
+    def _addChildren(self, node, rType, nodes, relations, structural=False):
         ''' Add all the children of this node that are connected by the specified Relationship type.
         '''
         q = Query(self.db)
         n = Node(q, nodeId=_id(node))
         q.setStartNode(n)
-        q.addRelationship(relationType=rType, end=n)
+        r = Relationship(q, relationType=rType, end=n)
+        if structural:
+            r.properties = {'structural': True}
+        q.addRelationship(r)
         rGen = q.results(limit=500)
         subresults = rGen.fetch_all()
         for result in subresults:
-            self._filterNodesAndRelationships(result, nodes, relations)
+            self._filterNodesAndRelationships(result.values, nodes, relations)
                     
     def _addHierarchicalMusic21Data(self, parent, parentId, nodes, relates):
         # Some bits of the music21-to-MusicXML conversion process are sensitive to order.
@@ -2127,17 +2101,18 @@ class Relationship(Entity):
     def __repr__(self):
         distance = props = ''
         delimiter = ':'
-        if not self.name:
-            delimiter = ''
+        rType = self.relationType
         if self.maxDistance:
             distance = '*'
             if self.relationType == '*':
                 distance = ''
-                delimiter = ''
             distance = distance + '1..%d' % self.maxDistance
+        elif rType == '*':
+            rType = ''
+            delimiter = ''
         if (self.properties):
             props = ' {' + ','.join(['%s:%s' % (k, repr(v)) for k, v in self.properties.items()]) + '}'
-        return '(%s)-[%s%s%s%s%s]->(%s)' % (self.start, self.name, delimiter, self.relationType, distance, props, self.end)
+        return '(%s)-[%s%s%s%s%s]->(%s)' % (self.start, self.name, delimiter, rType, distance, props, self.end)
 
 class Property(Entity):
     '''An object representing a property of a node or relationship in the database.
